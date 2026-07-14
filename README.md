@@ -32,7 +32,7 @@ copy .env.example .env
 
 需要重点修改：
 
-- `DUMPS_DIR`：Minecraft 导出的 `dumps` 目录。
+- `DUMPS_DIR`：Minecraft 导出的 `dumps` 目录。当前数据源由 [iouter/GTNH-Dumper](https://github.com/iouter/GTNH-Dumper) 生成，`DUMPS_DIR` 应指向这个工具导出的目录。
 - `BASE_URL`：目标 wiki 的 MediaWiki API 地址，默认是 `https://gtnh.huijiwiki.com/api.php`。
 - `AUTHKEY`：wiki API 需要的认证 key。
 - `EDITOR_USERNAME` / `EDITOR_PASSWORD`：普通编辑账号，供 `wiki.py` 使用。

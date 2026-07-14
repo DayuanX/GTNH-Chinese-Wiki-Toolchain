@@ -32,6 +32,8 @@
 copy .env.example .env
 ```
 
+其中 `DUMPS_DIR` 对应 Minecraft 导出的 `dumps` 目录。当前数据源由 [iouter/GTNH-Dumper](https://github.com/iouter/GTNH-Dumper) 导出，填写时应让 `DUMPS_DIR` 指向 GTNH-Dumper 生成的 dumps 目录。
+
 ## 常用命令
 
 ```bash
