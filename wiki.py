@@ -462,6 +462,8 @@ def batch_save_wikitext(titles: list[str]) -> list[str]:
 def upload_file(path: str, summary: str = "") -> dict:
     """从本地页面文件上传，页面标题从相对 WIKITEXT_DIR 的路径还原"""
     abs_path = os.path.abspath(path)
+    if "filtered" in abs_path.replace("\\", "/").casefold().split("/"):
+        raise ValueError("filtered 目录请配置 MOD_LOCAL_NAME、MOD_REMOTE_NAME 和 MOD_VERSION，依次运行 databaseDump 中的 split_all.py、wiki_inventory.py、data_upload.py")
     wikitext_dir = os.path.abspath(WIKITEXT_DIR)
     if abs_path.startswith(wikitext_dir + os.sep):
         rel = os.path.relpath(abs_path, wikitext_dir)
@@ -477,7 +479,10 @@ def batch_upload_dir(directory: str = None, summary: str = "") -> list[str]:
     """上传目录下所有 wiki 页面文件"""
     directory = directory or WIKITEXT_DIR
     files = []
-    for root, _, names in os.walk(directory):
+    for root, dirs, names in os.walk(directory):
+        dirs[:] = [name for name in dirs if name.casefold() != "filtered"]
+        if "filtered" in os.path.abspath(root).replace("\\", "/").casefold().split("/"):
+            continue
         for name in names:
             if name.endswith((".wikitext", ".js", ".css", ".lua", ".json")):
                 files.append(os.path.join(root, name))
