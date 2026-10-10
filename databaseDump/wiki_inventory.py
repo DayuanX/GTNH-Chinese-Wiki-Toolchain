@@ -16,9 +16,12 @@ import os
 import sys
 import json
 import sqlite3
+from contextlib import closing
 import urllib.request
 import urllib.parse
 import http.cookiejar
+
+from data_version import in_scope, require_scope, version_tag
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
@@ -54,7 +57,7 @@ USERNAME = os.environ.get("EDITOR_USERNAME", "")
 PASSWORD = os.environ.get("EDITOR_PASSWORD", "")
 WIKITEXT_DIR = os.path.join(_PROJECT_ROOT, "wikitext")
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wiki_inventory.db")
-WIKI_PREFIX = "Data:Versions/GTNH/2.9.0-beta-1"
+WIKI_PREFIX = "Data:Versions/" + version_tag() + "/"
 
 # ── HTTP ─────────────────────────────────────────────────────
 
@@ -113,7 +116,7 @@ def title_to_path(title: str) -> str:
 # ── Database ─────────────────────────────────────────────────
 
 def init_db(refresh: bool):
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
         if refresh:
             conn.execute("DROP TABLE IF EXISTS tasks")
         conn.execute("""
@@ -131,7 +134,7 @@ def init_db(refresh: bool):
 
 def get_pending_uploads() -> list[tuple[str, str]]:
     """获取待上传任务列表，返回 [(path, title), ...]"""
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
         rows = conn.execute(
             "SELECT path, title FROM tasks WHERE status='pending_upload' AND path IS NOT NULL ORDER BY path"
         ).fetchall()
@@ -140,7 +143,7 @@ def get_pending_uploads() -> list[tuple[str, str]]:
 
 def get_pending_deletes() -> list[str]:
     """获取待删除的 wiki 标题列表。"""
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
         rows = conn.execute(
             "SELECT title FROM tasks WHERE status='pending_delete' ORDER BY title"
         ).fetchall()
@@ -149,7 +152,7 @@ def get_pending_deletes() -> list[str]:
 
 def mark_upload_done(path: str, title: str, mtime: float, size: int):
     """上传成功 → done"""
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute(
             "UPDATE tasks SET status='done', mtime=?, size=? WHERE title=?",
             (mtime, size, title)
@@ -159,13 +162,13 @@ def mark_upload_done(path: str, title: str, mtime: float, size: int):
 
 def mark_delete_done(title: str):
     """删除成功 → 移除记录"""
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute("DELETE FROM tasks WHERE title=?", (title,))
         conn.commit()
 
 
 def get_stats() -> dict:
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
         rows = conn.execute(
             "SELECT status, COUNT(*) FROM tasks GROUP BY status"
         ).fetchall()
@@ -175,14 +178,14 @@ def get_stats() -> dict:
 # ── Scan & Cross-reference ───────────────────────────────────
 
 def scan_local_files() -> dict[str, tuple[float, int]]:
-    """扫描 Data/Versions/ 目录下所有文件，返回 {rel_path: (mtime, size)}"""
+    """只扫描配置的模组/版本，返回 {rel_path: (mtime, size)}。"""
     files = {}
-    scan_root = os.path.join(WIKITEXT_DIR, "Data", "Versions")
+    scan_root = os.path.join(WIKITEXT_DIR, title_to_path(WIKI_PREFIX).replace("/", os.sep))
     if not os.path.isdir(scan_root):
         print(f"  Directory not found: {scan_root}")
         return files
     wikitext_abs = os.path.abspath(WIKITEXT_DIR)
-    for root, _, names in os.walk(scan_root):
+    for root, dirs, names in os.walk(scan_root):
         for name in names:
             abs_path = os.path.join(root, name)
             rel = os.path.relpath(abs_path, wikitext_abs).replace("\\", "/")
@@ -194,6 +197,7 @@ def scan_local_files() -> dict[str, tuple[float, int]]:
 def fetch_wiki_titles() -> set[str]:
     """从 wiki 抓取所有匹配前缀的页面标题（空格归一化为下划线）。"""
     titles = set()
+    offset = 0
     params = {
         "action": "query",
         "list": "prefixsearch",
@@ -206,11 +210,13 @@ def fetch_wiki_titles() -> set[str]:
         batch = r["query"]["prefixsearch"]
         for p in batch:
             # MediaWiki 将 _ 和空格视为等价，统一为下划线
-            titles.add(p["title"].replace(" ", "_"))
+            if in_scope(p["title"], WIKI_PREFIX):
+                titles.add(p["title"].replace(" ", "_"))
         print(f"  Fetched {len(batch)}, total: {len(titles)}")
         if len(batch) < 500:
             break
-        params["psoffset"] = len(titles)
+        offset += len(batch)
+        params["psoffset"] = offset
     return titles
 
 
@@ -223,14 +229,14 @@ def rebuild_tasks(refresh: bool):
     # 加载旧任务中的 done 记录（用于变更检测）
     old_done = {}
     if not refresh:
-        with sqlite3.connect(DB_PATH) as conn:
+        with closing(sqlite3.connect(DB_PATH)) as conn:
             for row in conn.execute(
                 "SELECT title, path, mtime, size FROM tasks WHERE status='done' AND path IS NOT NULL"
             ):
                 old_done[row[0]] = (row[1], row[2], row[3])
 
     login()
-    print(f"Fetching wiki pages under '{WIKI_PREFIX}/'...")
+    print(f"Fetching wiki pages under '{WIKI_PREFIX}'...")
     wiki_titles = fetch_wiki_titles()
     print(f"  Found {len(wiki_titles):,} wiki pages")
 
@@ -267,7 +273,7 @@ def rebuild_tasks(refresh: bool):
             delete_count += 1
 
     # 写入
-    with sqlite3.connect(DB_PATH) as conn:
+    with closing(sqlite3.connect(DB_PATH)) as conn:
         conn.execute("DELETE FROM tasks")
         conn.executemany(
             "INSERT INTO tasks VALUES (?, ?, ?, ?, ?)", tasks
@@ -282,9 +288,11 @@ def rebuild_tasks(refresh: bool):
 
 # ── Main ─────────────────────────────────────────────────────
 
-def main():
-    refresh = "--refresh" in sys.argv
-    stats_only = "--stats" in sys.argv
+def main(argv=None):
+    require_scope(WIKI_PREFIX)
+    args = sys.argv[1:] if argv is None else argv
+    refresh = "--refresh" in args
+    stats_only = "--stats" in args
 
     if stats_only:
         stats = get_stats()

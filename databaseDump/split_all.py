@@ -15,7 +15,7 @@ Usage:
 import json
 import os
 import sys
-import glob
+from data_version import local_mod_name, source_directory, version_tag
 
 # Ensure real-time progress output
 sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, 'reconfigure') else None
@@ -48,6 +48,16 @@ _load_dotenv()
 # 项目根目录（.env 所在，向上两级）
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DUMPS_DIR = os.environ.get("DUMPS_DIR", "")
+# 模组导出可从完整 dumps 中补充图标/流体等关联数据。
+REFERENCE_DUMPS_DIR = DUMPS_DIR
+if DUMPS_DIR and local_mod_name():
+    DUMPS_DIR = str(source_directory(DUMPS_DIR, local_mod_name(), check_exists=False))
+AUX_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def reference_path(name: str) -> str:
+    local = os.path.join(DUMPS_DIR, name)
+    return local if os.path.isfile(local) else os.path.join(REFERENCE_DUMPS_DIR, name)
 
 # ============================================================
 # Common utilities
@@ -55,6 +65,13 @@ DUMPS_DIR = os.environ.get("DUMPS_DIR", "")
 
 MAX_FILE_SIZE = 1.8 * 1024 * 1024   # 1.8 MB (target 2 MB)
 INDEX_OVERHEAD = 30                  # "index": "99/99999"
+
+BEE_TYPES_BY_RAW_KEY = {
+    "Forestry:beeDroneGE": "DRONE",
+    "Forestry:beePrincessGE": "PRINCESS",
+    "Forestry:beeQueenGE": "QUEEN",
+    "Forestry:beeLarvaeGE": "LARVAE",
+}
 
 
 def wrapper_head(key: str) -> str:
@@ -76,6 +93,49 @@ def serialize_item(item: dict) -> str:
 def indent_lines(s: str, spaces: int = 2) -> str:
     prefix = " " * spaces
     return "\n".join(prefix + line for line in s.split("\n"))
+
+
+def _bee_query_key(identity) -> str | None:
+    """Return the stable species/type key exported by the dumper."""
+    if not isinstance(identity, dict):
+        return None
+    species_uid = identity.get("speciesUid")
+    bee_type = identity.get("type")
+    if not isinstance(species_uid, str) or not species_uid:
+        return None
+    if not isinstance(bee_type, str) or bee_type not in set(BEE_TYPES_BY_RAW_KEY.values()):
+        return None
+    return f"bee:{bee_type}:{species_uid}"
+
+
+def _add_bee_query_keys(items: list[dict]) -> None:
+    """Add queryKey without changing the exact NBT-derived item key."""
+    added = 0
+    incomplete = []
+    for item in items:
+        identity = item.get("beeIdentity")
+        if identity is None:
+            continue
+        query_key = _bee_query_key(identity)
+        raw_key = item.get("rawKey") or item.get("key")
+        expected_type = BEE_TYPES_BY_RAW_KEY.get(raw_key)
+        if not query_key or (expected_type and identity.get("type") != expected_type):
+            incomplete.append({
+                "key": item.get("key"),
+                "rawKey": raw_key,
+                "beeIdentity": identity,
+                "issue": "invalid_or_mismatched_bee_identity",
+            })
+            continue
+        item["queryKey"] = query_key
+        added += 1
+    print(f"  [Bee identity] Added queryKey to {added:,} item(s)")
+    if incomplete:
+        print(f"  WARNING: {len(incomplete):,} item(s) have incomplete or mismatched bee identity")
+        path = os.path.join(AUX_DIR, "bee_item_identity_diagnostics.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(incomplete, f, ensure_ascii=False, indent=2)
+        print(f"  [Bee identity] Diagnostics written to {path}")
 
 
 def split_array(items: list, key: str, debug: bool) -> list:
@@ -155,7 +215,7 @@ def write_batches(items: list, batches: list, key: str, output_dir: str):
 # ============================================================
 
 def _clean_tooltips(items: list):
-    """移除所有 tooltip 字段中无意义的格式码（§z颜色码 / §!shift / §!ctrl 等）。"""
+    """移除所有 tooltip 字段中的组件占位符（§z数字§Z）及 §!shift / §!ctrl 标记。"""
     import re
     removed = 0
     for item in items:
@@ -164,7 +224,7 @@ def _clean_tooltips(items: list):
             if not tips:
                 continue
             old = tips
-            tips = re.sub(r"<br>§z\d+", "", tips)
+            tips = re.sub(r"<br>§z\d+§Z", "", tips)
             tips = re.sub(r"<br>§!shift", "", tips)
             tips = re.sub(r"<br>§!ctrl", "", tips)
             if tips != old:
@@ -198,7 +258,7 @@ def _clean_tooltips(items: list):
 
 def _load_nbt_regress_cache():
     """加载 NBT 退行缓存。返回 (regress_set, keep_set)。"""
-    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nbt_regress_cache.json")
+    cache_path = os.path.join(AUX_DIR, "nbt_regress_cache.json")
     if not os.path.exists(cache_path):
         return set(), set()
     try:
@@ -211,7 +271,7 @@ def _load_nbt_regress_cache():
 
 def _save_nbt_regress_cache(regress_set, keep_set):
     """保存 NBT 退行缓存。"""
-    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nbt_regress_cache.json")
+    cache_path = os.path.join(AUX_DIR, "nbt_regress_cache.json")
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump({"regress": sorted(regress_set), "keep": sorted(keep_set)}, f, ensure_ascii=False, indent=2)
 
@@ -319,7 +379,7 @@ def _regress_nbt_only_items(items: list):
     前提：rawKey 相同的 item 总是连续排列。
     使用 nbt_regress_cache.json 缓存已确认的结果，避免重复扫描 recipe。
     """
-    recipes_dir = os.path.join(os.environ.get("DUMPS_DIR", ""), "recipes")
+    recipes_dir = os.path.join(DUMPS_DIR, "recipes")
 
     # Step 0: 空 NBT (nbt: "{}") 对应的固定 hash 后缀 _gLuB0gegBqh1aRe，直接退行
     EMPTY_NBT_SUFFIX = "_gLuB0gegBqh1aRe"
@@ -387,6 +447,7 @@ def _regress_nbt_only_items(items: list):
     unmatched = set(keys_to_scan.keys())
     recipe_files = []
     for root, dirs, files in os.walk(recipes_dir):
+        dirs[:] = [name for name in dirs if name.casefold() != "filtered"]
         for fn in files:
             if fn.endswith(".json"):
                 recipe_files.append(os.path.join(root, fn))
@@ -450,13 +511,13 @@ def _inject_custom_items(items: list):
 # Tasks
 # ============================================================
 
-VERSION_TAG = "GTNH/2.9.0-beta-1"
+VERSION_TAG = version_tag()
 VERSION = os.path.join(_PROJECT_ROOT, "wikitext", "Data", "Versions", VERSION_TAG)
 
 
 def _load_itemicon_map():
     """加载 itemicon.json 并构建 shortKey -> {iconName, size, frameCount} 的查找表。"""
-    path = os.path.join(DUMPS_DIR, "itemicon.json")
+    path = reference_path("itemicon.json")
     print(f"  Loading icon data: {path} ({os.path.getsize(path) / 1024 / 1024:.1f} MB)...")
     data = json.load(open(path, "r", encoding="utf-8"))
     icon_map = {}
@@ -543,7 +604,7 @@ def _merge_item_icons(items: list, icon_map: dict):
 
 def _load_fluid_map():
     """加载 fluid.json 并构建 gtDisplayKey -> fluid_data 的查找表。"""
-    path = os.path.join(DUMPS_DIR, "fluid.json")
+    path = reference_path("fluid.json")
     print(f"  Loading fluid data: {path} ({os.path.getsize(path) / 1024 / 1024:.1f} MB)...")
     data = json.load(open(path, "r", encoding="utf-8"))
     fluid_map = {}
@@ -640,6 +701,8 @@ def do_items(debug: bool):
         elif sk:
             item["key"] = sk
 
+    _add_bee_query_keys(items)
+
     # ⑤b 修正 aspectrecipeindex:aspect 的 key：用 originalName 替换无意义的 NBT hash
     _fix_aspectrecipeindex_keys(items)
 
@@ -660,64 +723,65 @@ def do_items(debug: bool):
     # ⑧ 文件 rename（no-op，因内存已 rename，但保留以处理 write_batches 未覆盖的情况）
     _rename_key_fields(os.path.join(VERSION, "Items"), "items")
 
-    # Write global .tabx index (as few files as possible)
-    index_dir = os.path.join(VERSION, "Index")
-    os.makedirs(index_dir, exist_ok=True)
-    schema = {
-        "sources": f"从{VERSION_TAG}导出",
-        "schema": {
-            "fields": [
-                {"name": "key", "type": "string",
-                 "title": {"en": "key", "zh": "key"}},
-                {"name": "index", "type": "string",
-                 "title": {"en": "index", "zh": "index"}},
-            ]
-        },
-    }
-    # Collect all index entries across all batches
-    all_rows = []
-    for file_idx, (start, end) in enumerate(batches):
-        for pos, global_i in enumerate(range(start, end)):
-            all_rows.append([items[global_i].get("key", ""),
-                             f"{file_idx}/{pos}"])
+    # 已停用独立 Index/*.tabx 物品定位表；保留原实现供参考。
+    # # Write global .tabx index (as few files as possible)
+    # index_dir = os.path.join(VERSION, "Index")
+    # os.makedirs(index_dir, exist_ok=True)
+    # schema = {
+    #     "sources": f"从{VERSION_TAG}导出",
+    #     "schema": {
+    #         "fields": [
+    #             {"name": "key", "type": "string",
+    #              "title": {"en": "key", "zh": "key"}},
+    #             {"name": "index", "type": "string",
+    #              "title": {"en": "index", "zh": "index"}},
+    #         ]
+    #     },
+    # }
+    # # Collect all index entries across all batches
+    # all_rows = []
+    # for file_idx, (start, end) in enumerate(batches):
+    #     for pos, global_i in enumerate(range(start, end)):
+    #         all_rows.append([items[global_i].get("key", ""),
+    #                          f"{file_idx}/{pos}"])
 
-    # Split into as few tabx files as possible (sample-based estimate)
-    tabx_empty = dict(schema)
-    tabx_empty["data"] = []
-    shell = len(json.dumps(tabx_empty, ensure_ascii=False, indent=2).encode("utf-8"))
-    # Measure one sample row's overhead
-    sample = dict(schema)
-    sample["data"] = [all_rows[0]]
-    row_overhead = (len(json.dumps(sample, ensure_ascii=False, indent=2).encode("utf-8"))
-                    - shell - len(json.dumps(all_rows[0], ensure_ascii=False).encode("utf-8")))
+    # # Split into as few tabx files as possible (sample-based estimate)
+    # tabx_empty = dict(schema)
+    # tabx_empty["data"] = []
+    # shell = len(json.dumps(tabx_empty, ensure_ascii=False, indent=2).encode("utf-8"))
+    # # Measure one sample row's overhead
+    # sample = dict(schema)
+    # sample["data"] = [all_rows[0]]
+    # row_overhead = (len(json.dumps(sample, ensure_ascii=False, indent=2).encode("utf-8"))
+    #                 - shell - len(json.dumps(all_rows[0], ensure_ascii=False).encode("utf-8")))
 
-    tabx_idx = 0
-    batch_start = 0
-    current_est = shell
+    # tabx_idx = 0
+    # batch_start = 0
+    # current_est = shell
 
-    for i, row in enumerate(all_rows):
-        row_est = len(json.dumps(row, ensure_ascii=False).encode("utf-8")) + row_overhead
-        if current_est + row_est > MAX_FILE_SIZE and i > batch_start:
-            # Write batch
-            out = dict(schema)
-            out["data"] = all_rows[batch_start:i]
-            out_path = os.path.join(index_dir, f"{tabx_idx}.tabx")
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(out, f, ensure_ascii=False, indent=2)
-            print(f"  -> {tabx_idx}.tabx: {i - batch_start:,} rows")
-            tabx_idx += 1
-            batch_start = i
-            current_est = shell + row_est
-        else:
-            current_est += row_est
+    # for i, row in enumerate(all_rows):
+    #     row_est = len(json.dumps(row, ensure_ascii=False).encode("utf-8")) + row_overhead
+    #     if current_est + row_est > MAX_FILE_SIZE and i > batch_start:
+    #         # Write batch
+    #         out = dict(schema)
+    #         out["data"] = all_rows[batch_start:i]
+    #         out_path = os.path.join(index_dir, f"{tabx_idx}.tabx")
+    #         with open(out_path, "w", encoding="utf-8") as f:
+    #             json.dump(out, f, ensure_ascii=False, indent=2)
+    #         print(f"  -> {tabx_idx}.tabx: {i - batch_start:,} rows")
+    #         tabx_idx += 1
+    #         batch_start = i
+    #         current_est = shell + row_est
+    #     else:
+    #         current_est += row_est
 
-    if batch_start < len(all_rows):
-        out = dict(schema)
-        out["data"] = all_rows[batch_start:]
-        out_path = os.path.join(index_dir, f"{tabx_idx}.tabx")
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(out, f, ensure_ascii=False, indent=2)
-        print(f"  -> {tabx_idx}.tabx: {len(all_rows) - batch_start:,} rows")
+    # if batch_start < len(all_rows):
+    #     out = dict(schema)
+    #     out["data"] = all_rows[batch_start:]
+    #     out_path = os.path.join(index_dir, f"{tabx_idx}.tabx")
+    #     with open(out_path, "w", encoding="utf-8") as f:
+    #         json.dump(out, f, ensure_ascii=False, indent=2)
+    #     print(f"  -> {tabx_idx}.tabx: {len(all_rows) - batch_start:,} rows")
 
 
 def _scan_schema(items: list) -> list[dict]:
@@ -812,6 +876,8 @@ def do_items_tabx(debug: bool):
             item["key"] = sk
         elif sk:
             item["key"] = sk
+
+    _add_bee_query_keys(items)
 
     # ⑤b 修正 aspectrecipeindex:aspect 的 key：用 originalName 替换无意义的 NBT hash
     _fix_aspectrecipeindex_keys(items)
@@ -1407,6 +1473,19 @@ def _extract_crop_from_nbt(nbt_str):
     return m.group(1) if m else None
 
 
+def _iter_recipe_item_entries(value):
+    """Yield object-form items from scalar, object, and candidate-array slots."""
+    if isinstance(value, list):
+        for entry in value:
+            yield from _iter_recipe_item_entries(entry)
+    elif isinstance(value, dict):
+        if "key" in value or "beeIdentity" in value:
+            yield value
+        else:
+            for entry in value.values():
+                yield from _iter_recipe_item_entries(entry)
+
+
 def _fix_recipe_nbt(output_dir: str):
     """对已输出的 Recipes 做后处理：item 同时有 key 和 nbt 时，
     在 Items 中查找 (key, nbt) → shortKey，找到则替换 key 并删 nbt。
@@ -1416,10 +1495,11 @@ def _fix_recipe_nbt(output_dir: str):
         print("  [NBT fix] Items 目录不存在，跳过")
         return
 
-    # 构建 (key, nbt) → shortKey 索引
-    # cropsnh 额外建立 (rawKey, "crop:"+crop) → shortKey 索引
-    print("  [NBT fix] Building (key, nbt) index from Items...")
+    # 精确物品关联与蜜蜂物种级关联是两个独立索引。
+    # cropsnh 额外建立 (rawKey, "crop:"+crop) → shortKey 索引。
+    print("  [NBT fix] Building exact and bee identity indexes from Items...")
     nbt_index = {}
+    bee_index = {}
     for fname in sorted(os.listdir(items_dir)):
         if not fname.endswith(".json"):
             continue
@@ -1431,22 +1511,27 @@ def _fix_recipe_nbt(output_dir: str):
             nbt = item.get("nbt", "") or ""
             sk = item.get("key", "")
             if rk and sk and nbt:
-                if (rk, nbt) not in nbt_index:
-                    nbt_index[(rk, nbt)] = sk
+                nbt_index.setdefault((rk, nbt), set()).add(sk)
                 # cropsnh: 额外按 crop 值索引，用于 recipe NBT 和 item NBT 不全等的情况
                 if rk.startswith("cropsnh:"):
                     crop = _extract_crop_from_nbt(nbt)
                     if crop:
                         crop_key = (rk, f"crop:{crop}")
-                        if crop_key not in nbt_index:
-                            nbt_index[crop_key] = sk
-    print(f"  [NBT fix] Indexed {len(nbt_index)} (key, nbt/crop) pairs")
+                        nbt_index.setdefault(crop_key, set()).add(sk)
+            query_key = item.get("queryKey") or _bee_query_key(item.get("beeIdentity"))
+            if query_key and sk:
+                bee_index.setdefault(query_key, set()).add(sk)
+    print(
+        f"  [NBT fix] Indexed {len(nbt_index)} exact NBT/crop pair(s) and "
+        f"{len(bee_index)} bee identity key(s)"
+    )
 
     SLOT_KEYS = ("inputItems", "outputItems", "otherItems",
                  "inputFluids", "outputFluids")
     total = 0
     replaced = 0
     missing = set()
+    bee_diagnostics = []
 
     for root, dirs, files in os.walk(output_dir):
         for fname in files:
@@ -1461,29 +1546,86 @@ def _fix_recipe_nbt(output_dir: str):
                     items = recipe.get(slot_key)
                     if not isinstance(items, list):
                         continue
-                    for item in items:
-                        if not isinstance(item, dict):
-                            continue
+                    for item in _iter_recipe_item_entries(items):
                         nbt = item.get("nbt", "") or ""
                         key = item.get("key", "")
-                        if not nbt or not key:
+                        if not key:
+                            continue
+                        original_key = key
+                        expected_bee_type = BEE_TYPES_BY_RAW_KEY.get(key)
+                        identity = item.get("beeIdentity")
+                        query_key = _bee_query_key(identity)
+                        if identity is not None or expected_bee_type:
+                            if not query_key or (expected_bee_type and identity.get("type") != expected_bee_type):
+                                bee_diagnostics.append({
+                                    "file": os.path.relpath(path, output_dir),
+                                    "recipeIndex": recipe.get("index"),
+                                    "slot": slot_key,
+                                    "rawKey": key,
+                                    "beeIdentity": identity,
+                                    "issue": "missing_or_mismatched_identity_reexport_required",
+                                })
+                            else:
+                                item["queryKey"] = query_key
+                                modified = True
+
+                        if not nbt:
                             continue
                         total += 1
-                        # 先尝试精确 NBT 匹配
-                        sk = nbt_index.get((key, nbt))
+                        # 先尝试精确 NBT 匹配；重复候选不任意取第一项。
+                        exact_candidates = nbt_index.get((key, nbt), set())
                         # cropsnh 兜底：按 crop 值匹配
-                        if not sk and key.startswith("cropsnh:"):
+                        if not exact_candidates and key.startswith("cropsnh:"):
                             crop = _extract_crop_from_nbt(nbt)
                             if crop:
-                                sk = nbt_index.get((key, f"crop:{crop}"))
-                        if sk:
+                                exact_candidates = nbt_index.get((key, f"crop:{crop}"), set())
+                        if len(exact_candidates) == 1:
+                            sk = next(iter(exact_candidates))
                             item["rawKey"] = key
                             item["key"] = sk
                             del item["nbt"]
                             replaced += 1
                             modified = True
+                        elif len(exact_candidates) > 1:
+                            if query_key:
+                                item["displayKey"] = query_key
+                                item["associationError"] = "ambiguous_exact_item_association"
+                                modified = True
+                            bee_diagnostics.append({
+                                "file": os.path.relpath(path, output_dir),
+                                "recipeIndex": recipe.get("index"),
+                                "slot": slot_key,
+                                "rawKey": key,
+                                "issue": "ambiguous_exact_item_association",
+                                "candidates": sorted(exact_candidates),
+                            })
                         else:
                             missing.add((key, nbt))
+                            if query_key:
+                                display_candidates = bee_index.get(query_key, set())
+                                if len(display_candidates) == 1:
+                                    item["displayKey"] = next(iter(display_candidates))
+                                    modified = True
+                                else:
+                                    issue = ("missing_display_item" if not display_candidates
+                                             else "ambiguous_display_item")
+                                    # Never let rawKey fallback choose an arbitrary bee variant.
+                                    item["displayKey"] = query_key
+                                    item["associationError"] = issue
+                                    modified = True
+                                    bee_diagnostics.append({
+                                        "file": os.path.relpath(path, output_dir),
+                                        "recipeIndex": recipe.get("index"),
+                                        "slot": slot_key,
+                                        "rawKey": original_key,
+                                        "queryKey": query_key,
+                                        "issue": issue,
+                                        "candidates": sorted(display_candidates),
+                                    })
+                            elif expected_bee_type:
+                                item["displayKey"] = f"unresolved-bee:{expected_bee_type}"
+                                item["associationError"] = "missing_or_mismatched_identity_reexport_required"
+                                modified = True
             if modified:
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
@@ -1491,7 +1633,7 @@ def _fix_recipe_nbt(output_dir: str):
     print(f"  [NBT fix] Total NBT items: {total}, replaced: {replaced}, remaining: {remaining}")
 
     if missing:
-        csv_path = os.path.join(_PROJECT_ROOT, "databaseDump", "nbt_missing.csv")
+        csv_path = os.path.join(AUX_DIR, "nbt_missing.csv")
         with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
             import csv
             w = csv.writer(f)
@@ -1499,6 +1641,15 @@ def _fix_recipe_nbt(output_dir: str):
             for key, nbt in sorted(missing):
                 w.writerow([key, nbt])
         print(f"  [NBT fix] Missing (key, nbt) written to {csv_path}: {len(missing)} unique rows")
+
+    if bee_diagnostics:
+        diagnostics_path = os.path.join(AUX_DIR, "bee_association_diagnostics.json")
+        with open(diagnostics_path, "w", encoding="utf-8") as f:
+            json.dump(bee_diagnostics, f, ensure_ascii=False, indent=2)
+        print(
+            f"  [Bee identity] Diagnostics written to {diagnostics_path}: "
+            f"{len(bee_diagnostics):,} row(s)"
+        )
 
 
 def do_recipes(debug: bool):
@@ -1508,7 +1659,10 @@ def do_recipes(debug: bool):
     print("=" * 50)
 
     recipes_dir = os.path.join(DUMPS_DIR, "recipes")
-    json_files = glob.glob(os.path.join(recipes_dir, "**/*.json"), recursive=True)
+    json_files = []
+    for root, dirs, files in os.walk(recipes_dir):
+        dirs[:] = [name for name in dirs if name.casefold() != "filtered"]
+        json_files.extend(os.path.join(root, name) for name in files if name.endswith(".json"))
     json_files.sort()
     print(f"  Found {len(json_files)} file(s)")
 
@@ -1518,7 +1672,8 @@ def do_recipes(debug: bool):
             break
         print(f"\n  Processing: {fp}")
         try:
-            data = json.load(open(fp, "r", encoding="utf-8"))
+            with open(fp, "r", encoding="utf-8") as recipe_file:
+                data = json.load(recipe_file)
         except Exception as e:
             print(f"    Error: {e}")
             continue
@@ -1705,7 +1860,21 @@ def _rename_all():
     pass
 
 
+def configure_source():
+    global DUMPS_DIR, REFERENCE_DUMPS_DIR, VERSION_TAG, VERSION, AUX_DIR
+    VERSION_TAG = version_tag(required=True)
+    mod, version = VERSION_TAG.split("/")
+    local_mod = local_mod_name(required=True)
+    REFERENCE_DUMPS_DIR = str(source_directory(os.environ.get("DUMPS_DIR", ""), "GTNH"))
+    DUMPS_DIR = str(source_directory(REFERENCE_DUMPS_DIR, local_mod))
+    VERSION = os.path.join(_PROJECT_ROOT, "wikitext", "Data", "Versions", mod, version)
+    # NBT 判断依赖当前模组的配方，不能复用其他模组的扫描缓存。
+    AUX_DIR = os.path.join(_PROJECT_ROOT, "databaseDump", "source_state", local_mod, version)
+    os.makedirs(AUX_DIR, exist_ok=True)
+
+
 def main():
+    configure_source()
     debug = "--debug" in sys.argv
     tabx = "--tabx" in sys.argv
     args = [a.lower() for a in sys.argv[1:] if not a.startswith("--")]
@@ -1726,6 +1895,13 @@ def main():
         print("[TABX mode]\n")
 
     for key in tasks_to_run:
+        input_name = {"items": "advitempanel.json", "oredict": "oreDictionary.json",
+                      "gtmaterial": "gtmaterial.json", "ticmaterial": "ticmaterial.json"}.get(key)
+        if input_name:
+            path = os.path.join(DUMPS_DIR, input_name)
+            if not os.path.isfile(path) or os.path.getsize(path) == 0:
+                print(f"跳过缺失或空的输入: {path}")
+                continue
         if key == "items" and tabx:
             do_items_tabx(debug)
         else:

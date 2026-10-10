@@ -15,11 +15,13 @@ import io
 import json
 import copy
 import sqlite3
+from contextlib import closing
 import signal
 import threading
 import urllib.request
 import urllib.parse
 import http.cookiejar
+from image_version import image_paths, redirect_map, require_source
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
@@ -50,7 +52,7 @@ _load_dotenv()
 
 BASE = os.environ.get("BASE_URL", "https://gtnh.huijiwiki.com/api.php")
 AUTHKEY = os.environ.get("AUTHKEY", "")
-INVENTORY_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "image_inventory.db")
+DUMPS_DIR, INVENTORY_DB, _, NEW_CSV = image_paths(os.path.dirname(os.path.abspath(__file__)))
 USERNAME = os.environ.get("BOT_USERNAME", "")
 PASSWORD = os.environ.get("BOT_PASSWORD", "")
 
@@ -70,19 +72,22 @@ def sanitize_title(title: str) -> str:
 # ── Task DB ────────────────────────────────────────────────────
 
 def get_pending_redirects() -> list[tuple[str, str]]:
-    """读取 redirect_state=待更新 的任务 → [(redirect_from, icon_name), ...]"""
-    with sqlite3.connect(INVENTORY_DB) as conn:
+    """读取当前 CSV 中有效且图片已上传的待更新重定向。"""
+    if not os.path.isfile(INVENTORY_DB):
+        return []
+    current_redirects = redirect_map(NEW_CSV)
+    with closing(sqlite3.connect(INVENTORY_DB)) as conn:
         rows = conn.execute(
             "SELECT redirect_from, icon_name FROM images "
-            "WHERE redirect_state='待更新' AND redirect_from != '' "
+            "WHERE redirect_state='待更新' AND redirect_from != '' AND icon_state='已上传' "
             "ORDER BY redirect_from"
         ).fetchall()
-    return rows
+    return [(title, icon) for title, icon in rows if current_redirects.get(title) == icon]
 
 
 def mark_redirect_done(redirect_from: str, icon_name: str):
     """重定向创建成功 → redirect_state = 已上传"""
-    with sqlite3.connect(INVENTORY_DB) as conn:
+    with closing(sqlite3.connect(INVENTORY_DB)) as conn:
         conn.execute(
             "UPDATE images SET redirect_state='已上传' WHERE redirect_from=? AND icon_name=?",
             (redirect_from, icon_name)
@@ -212,6 +217,8 @@ def worker(task_list: list, total: int, counters: dict, lock: threading.Lock,
 # ── Main ─────────────────────────────────────────────────────
 
 def main():
+    require_source(DUMPS_DIR)
+    _stop.clear()
     args = sys.argv[1:]
     debug = "--debug" in args
     threads = 8
@@ -271,10 +278,7 @@ def main():
         for t in workers:
             t.join(timeout=2)
 
-    with sqlite3.connect(INVENTORY_DB) as conn:
-        remaining = conn.execute(
-            "SELECT COUNT(*) FROM images WHERE redirect_state='待更新'"
-        ).fetchone()[0]
+    remaining = len(get_pending_redirects())
     print(f"Done! OK: {counters['OK']}, SKIP: {counters['SKIP']}, FAIL: {counters['FAIL']}")
     if remaining:
         print(f"{remaining} redirects still pending (re-run to retry failures)")

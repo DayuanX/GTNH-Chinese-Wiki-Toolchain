@@ -16,10 +16,13 @@ import json
 import copy
 import signal
 import sqlite3
+from contextlib import closing
 import threading
 import urllib.request
 import urllib.parse
 import http.cookiejar
+
+from data_version import in_scope, require_scope, version_tag
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
@@ -56,6 +59,7 @@ WIKITEXT_DIR = os.path.join(_PROJECT_ROOT, "wikitext")
 TASK_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wiki_inventory.db")
 USERNAME = os.environ.get("BOT_USERNAME", "")
 PASSWORD = os.environ.get("BOT_PASSWORD", "")
+WIKI_PREFIX = "Data:Versions/" + version_tag() + "/"
 
 _stop = threading.Event()
 
@@ -64,16 +68,22 @@ _stop = threading.Event()
 
 def get_pending_uploads() -> list[tuple[str, str]]:
     """读取 wiki_inventory.db 中所有 pending_upload 任务 → [(path, title), ...]"""
-    with sqlite3.connect(TASK_DB) as conn:
+    with closing(sqlite3.connect(TASK_DB)) as conn:
         rows = conn.execute(
             "SELECT path, title FROM tasks WHERE status='pending_upload' AND path IS NOT NULL ORDER BY path"
         ).fetchall()
-    return rows
+    # 已停用 Index/*.tabx，避免本地旧文件或旧任务重新创建已删除的页面。
+    # return [(path, title) for path, title in rows if in_scope(title, WIKI_PREFIX)]
+    return [
+        (path, title) for path, title in rows
+        if in_scope(title, WIKI_PREFIX)
+        and not (in_scope(title, WIKI_PREFIX + "Index/") and title.endswith(".tabx"))
+    ]
 
 
 def mark_upload_done(path: str, title: str, mtime: float, size: int):
     """上传成功 → 标记 done"""
-    with sqlite3.connect(TASK_DB) as conn:
+    with closing(sqlite3.connect(TASK_DB)) as conn:
         conn.execute(
             "UPDATE tasks SET status='done', mtime=?, size=? WHERE title=?",
             (mtime, size, title)
@@ -83,16 +93,16 @@ def mark_upload_done(path: str, title: str, mtime: float, size: int):
 
 def get_pending_deletes() -> list[str]:
     """读取 pending_delete 任务 → [title, ...]"""
-    with sqlite3.connect(TASK_DB) as conn:
+    with closing(sqlite3.connect(TASK_DB)) as conn:
         rows = conn.execute(
             "SELECT title FROM tasks WHERE status='pending_delete' ORDER BY title"
         ).fetchall()
-    return [r[0] for r in rows]
+    return [r[0] for r in rows if in_scope(r[0], WIKI_PREFIX)]
 
 
 def mark_delete_done(title: str):
     """删除成功 → 移除记录"""
-    with sqlite3.connect(TASK_DB) as conn:
+    with closing(sqlite3.connect(TASK_DB)) as conn:
         conn.execute("DELETE FROM tasks WHERE title=?", (title,))
         conn.commit()
 
@@ -260,14 +270,19 @@ def worker(task_list: list, total: int, counters: dict, lock: threading.Lock,
 
 # ── Main ─────────────────────────────────────────────────────
 
-def main():
-    args = sys.argv[1:]
+def main(argv=None):
+    require_scope(WIKI_PREFIX)
+    args = sys.argv[1:] if argv is None else argv
     debug = "--debug" in args
     threads = 8
+    failures = 0
+    _stop.clear()
 
     for i, a in enumerate(args):
         if a == "-t" and i + 1 < len(args):
             threads = int(args[i + 1])
+    if threads < 1:
+        raise ValueError("线程数必须大于 0")
 
     # 单次登录
     master_jar = login_once(USERNAME, PASSWORD)
@@ -313,59 +328,56 @@ def main():
             while t.is_alive():
                 t.join(timeout=0.5)
 
-        with sqlite3.connect(TASK_DB) as conn:
-            remaining = conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status='pending_upload'"
-            ).fetchone()[0]
+        remaining = len(get_pending_uploads())
         print(f"Upload done! OK: {counters['OK']}, SKIP: {counters['SKIP']}, FAIL: {counters['FAIL']}")
+        failures += counters['FAIL']
         if remaining:
             print(f"{remaining} uploads still pending (re-run to retry failures)")
     else:
         print("No pending uploads.")
 
     # ── Delete ──
-    delete_titles = get_pending_deletes()
-    if delete_titles:
-        if debug:
-            delete_titles = delete_titles[:5]
-
-        total = len(delete_titles)
-        print(f"\n{total:,} pending deletes, {min(threads, total)} threads")
-
-        chunks = [[] for _ in range(min(threads, total))]
-        for i, t in enumerate(delete_titles):
-            chunks[i % len(chunks)].append(t)
-
-        counters = {"OK": 0, "FAIL": 0, "done": 0}
-        lock = threading.Lock()
-        workers = []
-        for tid in range(len(chunks)):
-            if not chunks[tid]:
-                continue
-            t = threading.Thread(
-                target=delete_worker,
-                args=(chunks[tid], total, counters, lock, master_jar),
-                daemon=True,
-            )
-            t.start()
-            workers.append(t)
-
-        print(f"Deleting {total} pages... (Ctrl+C to stop)\n")
-
-        for t in workers:
-            while t.is_alive():
-                t.join(timeout=0.5)
-
-        with sqlite3.connect(TASK_DB) as conn:
-            remaining = conn.execute(
-                "SELECT COUNT(*) FROM tasks WHERE status='pending_delete'"
-            ).fetchone()[0]
-        print(f"Delete done! OK: {counters['OK']}, FAIL: {counters['FAIL']}")
-        if remaining:
-            print(f"{remaining} deletes still pending (re-run to retry failures)")
-    else:
-        print("No pending deletes.")
+    # delete_titles = get_pending_deletes()
+    # if delete_titles:
+    #     if debug:
+    #         delete_titles = delete_titles[:5]
+    #
+    #     total = len(delete_titles)
+    #     print(f"\n{total:,} pending deletes, {min(threads, total)} threads")
+    #
+    #     chunks = [[] for _ in range(min(threads, total))]
+    #     for i, t in enumerate(delete_titles):
+    #         chunks[i % len(chunks)].append(t)
+    #
+    #     counters = {"OK": 0, "FAIL": 0, "done": 0}
+    #     lock = threading.Lock()
+    #     workers = []
+    #     for tid in range(len(chunks)):
+    #         if not chunks[tid]:
+    #             continue
+    #         t = threading.Thread(
+    #             target=delete_worker,
+    #             args=(chunks[tid], total, counters, lock, master_jar),
+    #             daemon=True,
+    #         )
+    #         t.start()
+    #         workers.append(t)
+    #
+    #     print(f"Deleting {total} pages... (Ctrl+C to stop)\n")
+    #
+    #     for t in workers:
+    #         while t.is_alive():
+    #             t.join(timeout=0.5)
+    #
+    #     remaining = len(get_pending_deletes())
+    #     print(f"Delete done! OK: {counters['OK']}, FAIL: {counters['FAIL']}")
+    #     failures += counters['FAIL']
+    #     if remaining:
+    #         print(f"{remaining} deletes still pending (re-run to retry failures)")
+    # else:
+    #     print("No pending deletes.")
+    return 130 if _stop.is_set() else (1 if failures else 0)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

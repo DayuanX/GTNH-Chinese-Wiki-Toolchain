@@ -15,11 +15,13 @@ import io
 import json
 import copy
 import sqlite3
+from contextlib import closing
 import signal
 import threading
 import urllib.request
 import urllib.parse
 import http.cookiejar
+from image_version import icon_names, image_paths, require_source
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
@@ -49,12 +51,10 @@ def _load_dotenv():
 _load_dotenv()
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DUMPS_DIR = os.environ.get("DUMPS_DIR", "")
+DUMPS_DIR, INVENTORY_DB, ICONS_DIR, _ = image_paths(os.path.dirname(os.path.abspath(__file__)))
 
 BASE = os.environ.get("BASE_URL", "https://gtnh.huijiwiki.com/api.php")
 AUTHKEY = os.environ.get("AUTHKEY", "")
-ICONS_DIR = os.path.join(DUMPS_DIR, "icons")
-INVENTORY_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "image_inventory.db")
 USERNAME = os.environ.get("BOT_USERNAME", "")
 PASSWORD = os.environ.get("BOT_PASSWORD", "")
 
@@ -64,19 +64,22 @@ _stop = threading.Event()
 # ── Task DB ────────────────────────────────────────────────────
 
 def get_pending_icons() -> list[str]:
-    """读取 icon_state=待更新 的图标（去重）。"""
-    with sqlite3.connect(INVENTORY_DB) as conn:
+    """读取当前来源中 icon_state=待更新 且本地存在的图标（去重）。"""
+    if not os.path.isfile(INVENTORY_DB):
+        return []
+    current_icons = icon_names(ICONS_DIR)
+    with closing(sqlite3.connect(INVENTORY_DB)) as conn:
         rows = conn.execute(
             "SELECT DISTINCT icon_name FROM images "
             "WHERE icon_state='待更新' AND icon_name != '' "
             "ORDER BY icon_name"
         ).fetchall()
-    return [r[0] for r in rows]
+    return [r[0] for r in rows if r[0] in current_icons]
 
 
 def mark_icon_done(icon_name: str):
     """图标上传成功 → 该图标所有行的 icon_state = 已上传"""
-    with sqlite3.connect(INVENTORY_DB) as conn:
+    with closing(sqlite3.connect(INVENTORY_DB)) as conn:
         conn.execute(
             "UPDATE images SET icon_state='已上传' WHERE icon_name=?",
             (icon_name,)
@@ -206,7 +209,7 @@ def worker(icon_list: list, total: int, counters: dict, lock: threading.Lock,
             if result.get("result") == "Success":
                 status, msg = "OK", ""
             else:
-                status, msg = "SKIP", result.get("result", "?")
+                raise RuntimeError(f"上传未成功: {result.get('result', '?')}")
             mark_icon_done(icon_name)  # wiki 已接受 = 已上传
         except Exception as e:
             err = str(e)
@@ -226,6 +229,8 @@ def worker(icon_list: list, total: int, counters: dict, lock: threading.Lock,
 # ── Main ─────────────────────────────────────────────────────
 
 def main():
+    require_source(DUMPS_DIR)
+    _stop.clear()
     args = sys.argv[1:]
     debug = "--debug" in args
     threads = 8
@@ -285,10 +290,7 @@ def main():
         for t in workers:
             t.join(timeout=2)
 
-    with sqlite3.connect(INVENTORY_DB) as conn:
-        remaining = conn.execute(
-            "SELECT COUNT(DISTINCT icon_name) FROM images WHERE icon_state='待更新'"
-        ).fetchone()[0]
+    remaining = len(get_pending_icons())
     print(f"Done! OK: {counters['OK']}, SKIP: {counters['SKIP']}, FAIL: {counters['FAIL']}")
     if remaining:
         print(f"{remaining} icons still pending (re-run to retry failures)")

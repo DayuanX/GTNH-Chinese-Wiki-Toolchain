@@ -14,10 +14,11 @@ image_inventory.py
     python image_inventory.py --clean-dynamic  # 删除 icon_name 以 _dynamic.png 结尾的行
 """
 
-import csv
 import os
 import sys
 import sqlite3
+from contextlib import closing
+from image_version import icon_names, image_paths, redirect_map, require_source
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(line_buffering=True)
@@ -46,10 +47,7 @@ def _load_dotenv():
 
 _load_dotenv()
 
-DUMPS_DIR = os.environ.get("DUMPS_DIR", "")
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "image_inventory.db")
-ICONS_DIR = os.path.join(DUMPS_DIR, "icons")
-NEW_CSV = os.path.join(DUMPS_DIR, "image_redirect.csv")
+DUMPS_DIR, DB_PATH, ICONS_DIR, NEW_CSV = image_paths(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ── Load current dumps state ──────────────────────────────────
@@ -58,7 +56,7 @@ def load_new_icons() -> set[str]:
     if not os.path.isdir(ICONS_DIR):
         print(f"WARNING: icons dir not found: {ICONS_DIR}")
         return set()
-    icons = set(os.listdir(ICONS_DIR))
+    icons = icon_names(ICONS_DIR)
     print(f"  Current icons: {len(icons):,}")
     return icons
 
@@ -69,13 +67,7 @@ def load_new_redirects() -> dict[str, str]:
     if not os.path.isfile(NEW_CSV):
         print(f"WARNING: redirect CSV not found: {NEW_CSV}")
         return redirects
-    with open(NEW_CSV, "r", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if len(row) >= 2:
-                redirect_from = row[0].strip()
-                icon = row[1].replace("File:", "").strip()
-                redirects[redirect_from] = icon
+    redirects = redirect_map(NEW_CSV)
     print(f"  Current redirects: {len(redirects):,}")
     return redirects
 
@@ -85,6 +77,8 @@ def load_new_redirects() -> dict[str, str]:
 def update_inventory():
     """以 dumps 为准，对比 DB 当前状态，更新 icon_state 和 redirect_state。
     redirect_from 分配以新 CSV 为准，有变动就标待更新，旧值不管。"""
+    require_source(DUMPS_DIR)
+    init_db()
     new_icons = load_new_icons()
     new_redirects = load_new_redirects()   # {redirect_from: icon_name}
 
@@ -203,7 +197,22 @@ def clean_dynamic():
 
 # ── Main ─────────────────────────────────────────────────────
 
+def init_db():
+    os.makedirs(os.path.dirname(os.path.abspath(DB_PATH)), exist_ok=True)
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS images (
+            icon_name TEXT PRIMARY KEY,
+            redirect_from TEXT DEFAULT '',
+            icon_state TEXT DEFAULT '待更新',
+            redirect_state TEXT DEFAULT '待更新'
+        )""")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_redirect ON images(redirect_from) WHERE redirect_from != ''")
+        conn.commit()
+
+
 def main():
+    require_source(DUMPS_DIR)
+    init_db()
     if "--stats" in sys.argv:
         conn = sqlite3.connect(DB_PATH)
         total = conn.execute("SELECT COUNT(*) FROM images").fetchone()[0]
