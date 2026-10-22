@@ -8,7 +8,7 @@ from contextlib import closing
 from unittest.mock import patch
 
 from image_state import init_db, pending_redirects, update_state
-from item_names import build_artifacts, collect_names, generate_config, load_choices, resolve_images, write_name_index
+from item_names import build_artifacts, collect_names, default_image_candidate, generate_config, load_choices, resolve_images, write_name_index
 from image_version import redirect_map
 from item_buckets import write_item_buckets
 from recipe_buckets import build_recipe_buckets, recipe_route
@@ -16,6 +16,31 @@ from routing_hash import ITEM_BUCKET_COUNT, bucket_id, short_hash
 
 
 class NameRoutingTests(unittest.TestCase):
+    def test_image_mod_priority_and_variant_preferences(self):
+        keys = ['minecraft:stone', 'fluid.stone', 'gregtech:stone', 'IC2:stone', 'other:stone']
+        for start, expected in enumerate(keys):
+            rows = [{'key': key} for key in keys[start:]]
+            for ordered in (rows, list(reversed(rows))):
+                self.assertEqual(expected, default_image_candidate(ordered)[0])
+
+        rows = [{'key': 'IC2:cell:9', 'rawKey': 'IC2:cell:9'},
+                {'key': 'IC2:cell_hash', 'rawKey': 'IC2:cell', 'nbt': '{a:1}'},
+                {'key': 'IC2:cell', 'rawKey': 'IC2:cell'},
+                {'key': 'other:cell'}]
+        self.assertEqual('IC2:cell', default_image_candidate(rows)[0])
+        self.assertIsNone(default_image_candidate([{'key': 'other:a'}, {'key': 'other:b'}])[0])
+
+    def test_deprecated_candidates_yield_to_active_items_and_manual_choices(self):
+        for marker in ('已弃用', '即将移除', '§cDEPRECATED'):
+            rows = [{'key': 'minecraft:old', 'translatedName': '同名', 'iconName': 'old.png',
+                     'tooltips': marker},
+                    {'key': 'other:current', 'translatedName': '同名', 'iconName': 'current.png'}]
+            groups = collect_names(rows)[1]
+            self.assertEqual({'File:同名.png': 'File:current.png'}, resolve_images(groups, {}, items=rows)[0])
+            self.assertEqual({'File:同名.png': 'File:old.png'},
+                             resolve_images(groups, {'同名.png': {'key': 'minecraft:old'}}, items=rows)[0])
+            self.assertEqual('minecraft:old', default_image_candidate(rows[:1])[0])
+
     def test_empty_nbt_and_chargeable_alias_do_not_overwrite_existing_key(self):
         import split_all
         items = [{"key": "mod:item", "rawKey": "mod:item"},
@@ -345,7 +370,7 @@ class DefaultImageRulesTest(unittest.TestCase):
 
     def test_fluid_and_cross_mod_priority(self):
         self.assertEqual(self.choose({'key': 'fluid.water', 'nbt': '{display:1}'},
-                                     {'key': 'gregtech:water'}, {'key': 'minecraft:water'}), 'fluid.water')
+                                     {'key': 'gregtech:water'}, {'key': 'minecraft:water'}), 'minecraft:water')
         self.assertEqual(self.choose({'key': 'gregtech:ingot:7'}, {'key': 'other:ingot'}),
                          'gregtech:ingot:7')
         self.assertIsNone(self.choose({'key': 'fluid.a'}, {'key': 'fluid.b'}))

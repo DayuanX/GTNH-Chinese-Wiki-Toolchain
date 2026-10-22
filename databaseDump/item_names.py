@@ -92,21 +92,29 @@ def default_image_candidate(items):
             candidates = matches
             reasons.append(reason)
 
+    def tooltip(item):
+        return re.sub(r'§.', '', item.get('tooltips', ''))
+
+    # 先选择仍在使用的物品，避免已移除的高优先级模组物品占用中文别名。
+    prefer([item for item in candidates
+            if not re.search(r'弃用|移除|\bdeprecated\b', tooltip(item), re.IGNORECASE)], 'current-item')
+
+    # 与线上 Database 的名称选择顺序一致；metadata 与 NBT 使用下方的显示偏好。
+    for prefix, reason in (('minecraft:', 'minecraft'), ('fluid.', 'fluid'),
+                           ('gregtech:', 'gregtech'), ('IC2:', 'ic2')):
+        matches = [item for item in candidates if item['key'].startswith(prefix)]
+        if matches:
+            prefer(matches, reason)
+            break
+
     # fluid.* 是预处理后的流体身份；其显示 NBT 不是普通物品变体。
-    prefer([item for item in candidates if item['key'].startswith('fluid.')], 'fluid')
     prefer([item for item in candidates
             if item['key'].startswith('fluid.')
             and item.get('registeredBy', '').lower() == 'gregtech'], 'gregtech-fluid-owner')
-    prefer([item for item in candidates if item['key'].startswith('gregtech:')], 'gregtech')
 
-    # GT 控制器的新旧关系由明确的弃用提示判定，不按 metadata 大小猜测。
+    # 电池箱的槽位数量由 tooltip 给出，与 metadata 的大小无对应关系。
     if all(item.get('rawKey', item['key']).startswith('gregtech:gt.blockmachines:')
            for item in candidates):
-        def tooltip(item):
-            return re.sub(r'§.', '', item.get('tooltips', ''))
-
-        prefer([item for item in candidates
-                if not re.search(r'已弃用|deprecated', tooltip(item), re.IGNORECASE)], 'current-controller')
         if all(item.get('translatedName', '').endswith('电池箱') for item in candidates):
             prefer([item for item in candidates
                     if re.search(r'(?:^|<br\s*/?>|\n)\s*1个槽位\s*(?:$|<br\s*/?>|\n)', tooltip(item))],

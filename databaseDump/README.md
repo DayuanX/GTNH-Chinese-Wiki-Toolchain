@@ -122,11 +122,12 @@ python split_all.py items
 
 默认读取 `config/preferred-items.json`（`schemaVersion: 2`）。每个标题的 `key` 是明确指定的
 完整物品 key，优先于自动规则；显式 `null` 表示跳过该别名。未配置的名称自动使用默认偏好：
-优先流体身份 `fluid.*`，然后优先 GregTech。在同一物品身份内优先无 NBT
+先优先选择 tooltip 中没有“弃用”“移除”或 `deprecated` 标记的物品，再按
+Minecraft → 流体身份 `fluid.*` → GregTech → IC2 → 其他模组选择。在同一物品身份内优先无 NBT
 版本，在同一注册物品内优先 damage 为 0 的版本。GT 矿石优先普通石头底岩；天然状态和
 小型矿石属性仍保留区分。筛选后仍不能唯一确定的名称留在本地未解决报告中。
 同一 rawKey 没有无 NBT 版本时，按完整 key 字典序选择第一个作为图片代表，配方继续使用各自的完整 key。
-GT 电池箱按 tooltip 选择 1 槽版本；GT 控制器依据“已弃用”或 `deprecated` 标记筛选当前版本。多个流体优先选择 `registeredBy=gregtech` 的候选；
+GT 电池箱按 tooltip 选择 1 槽版本。多个流体优先选择 `registeredBy=gregtech` 的候选；
 此字段来自 Forge 注册表；该规则适用于包含此字段的数据。
 同模组不同注册物品、没有零 damage 且无专门规则的多个子类型仍留给人工。
 矿石规则适用于 GT `gt.blockores2`～`gt.blockores7`。
