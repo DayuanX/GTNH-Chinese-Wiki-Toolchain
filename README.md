@@ -17,7 +17,7 @@
 
 ## 数据文件
 
-仓库里保留的是工具脚本和必要的任务数据库，不包含庞大的原始 `dumps/` 内容。
+仓库保存工具脚本和必要的任务数据库；原始 `dumps/` 数据存放在本地。
 
 - `databaseDump/image_inventory.db` 会保留在仓库中，用于记录图片上传与重定向状态。
 - `databaseDump/wiki_inventory.db` 每次都可以重新生成，不提交到仓库。
