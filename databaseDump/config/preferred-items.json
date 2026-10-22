@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 2,
+  "choices": {
+    "空单元.png": {
+      "key": "IC2:itemCellEmpty",
+      "reason": "空单元图片采用 IC2 的流体容器；ProjectRed 的同名物品是逻辑门。"
+    }
+  }
+}

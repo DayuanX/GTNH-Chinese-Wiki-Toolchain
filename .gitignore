@@ -6,3 +6,8 @@ databaseDump/wiki_inventory.db
 databaseDump/nbt_missing.csv
 databaseDump/nbt_regress_cache.json
 wikitext/
+databaseDump/source_state/
+databaseDump/config/image_names/*.bak
+databaseDump/config/image_names/*.json
+
+/databaseDump/image-name-candidates.json
