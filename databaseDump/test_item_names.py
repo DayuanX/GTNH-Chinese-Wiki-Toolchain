@@ -133,6 +133,24 @@ class NameRoutingTests(unittest.TestCase):
         self.assertFalse(redirects)
         self.assertIn('铜锭.png', invalid)
 
+    def test_gravitational_lens_preference_survives_addon_only_exports(self):
+        base = {'key': 'gregtech:gt.metaitem.03:32277', 'translatedName': '引力透镜',
+                'iconName': 'icon_gregtech_gt.metaitem.03_32277.png'}
+        addon = {'key': 'TwistSpaceTechnology:MetaItem01:18', 'translatedName': '引力透镜',
+                 'iconName': 'icon_TwistSpaceTechnology_MetaItem01_18.png'}
+        choices = load_choices(Path(__file__).parent / 'config/preferred-items.json')
+        choice = {'引力透镜.png': choices['引力透镜.png']}
+        for items in ([base], [base, addon]):
+            names, groups = collect_names(items)
+            redirects, unresolved, invalid = resolve_images(groups, choice, items=items)
+            self.assertEqual(redirects, {'File:引力透镜.png': 'File:' + base['iconName']})
+            self.assertFalse(unresolved or invalid)
+            self.assertEqual(set(names['引力透镜']), {item['key'] for item in items})
+        # 附属独立发布时保留本体的中文别名，附属物品仍使用自身图标身份。
+        redirects, _, invalid = resolve_images(collect_names([addon])[1], choice, items=[addon])
+        self.assertFalse(redirects)
+        self.assertEqual(invalid['引力透镜.png']['key'], base['key'])
+
     def test_build_defaults_use_full_nbt_records(self):
         items = [{'key': 'mod:item_a', 'rawKey': 'mod:item', 'nbt': '{a:1}',
                   'translatedName': '物品', 'iconName': 'a.png'},

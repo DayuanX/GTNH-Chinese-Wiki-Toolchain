@@ -4,6 +4,10 @@
     "空单元.png": {
       "key": "IC2:itemCellEmpty",
       "reason": "空单元图片采用 IC2 的流体容器；ProjectRed 的同名物品是逻辑门。"
+    },
+    "引力透镜.png": {
+      "key": "gregtech:gt.metaitem.03:32277",
+      "reason": "引力透镜图片采用整合包本体中的 GregTech 物品；TST 的同名物品使用其完整物品 key 对应的图片。"
     }
   }
 }

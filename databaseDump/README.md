@@ -144,6 +144,8 @@ GT 电池箱按 tooltip 选择 1 槽版本；GT 控制器依据“已弃用”�
 ```
 
 公共清单只保存明确约定，通过 PR 修改 `key` 和选择理由 `reason`。
+本体与附属共用这份清单。例如“引力透镜”明确选择 GT 物品；独立处理 TST 时，
+所选 GT key 不在候选中，该中文别名会记录到失效选择报告并跳过，TST 图标仍按完整物品身份处理。
 `IMAGE_NAME_CONFIG` 可显式指定同格式的自定义清单，替代默认公共清单。
 候选列表写入本地 `image-name-candidates.json`，冲突和失效选择写入
 `image-name-resolution.json`。这两个文件供本地检查，公共 PR 修改 `config/preferred-items.json`。
