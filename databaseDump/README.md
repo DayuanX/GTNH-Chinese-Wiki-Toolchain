@@ -74,6 +74,16 @@ python image_upload.py
 python image_redirect.py
 ```
 
+## 配方输入与输出归类
+
+`split_all.py recipes` 在关联物品 NBT 和切分页面前，使用 `recipe_roles.py` 按配方来源归类
+NEI 的附加槽位。已确认的燃料、灌注台试剂和作物基因提取器的数据介质写入 `inputItems`，
+副产物和掉落写入 `outputItems`；巫师烤炉分别归类燃料、黏土罐与副产物。
+归类保留候选顺序、NBT、概率和不消耗标记，缺少燃料的烤炉保留对应输入空位。
+
+研究站中已写入结果的数据棒、魔力池催化条件及其他展示集合继续保存在 `otherItems`，
+由对应界面解释和显示。已归类的数据可直接用于输入、输出查询。
+
 ## 图片上传
 
 `image_inventory.py`、`image_upload.py`、`image_redirect.py` 同样读取 `.env` 的模组配置：

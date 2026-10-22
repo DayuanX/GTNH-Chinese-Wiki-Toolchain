@@ -1677,7 +1677,9 @@ def do_recipes(debug: bool):
         output_dir = os.path.join(VERSION, "Recipes", subdir)
         os.makedirs(output_dir, exist_ok=True)
         # 原始 NBT 与通配候选先在内存归一化，发布目录只接收最终记录。
+        from recipe_roles import normalize_recipe_roles
         for recipe in recipes:
+            normalize_recipe_roles(recipe, metadata)
             associations.associate(recipe, os.path.join(subdir, "0.json"))
         # 清除旧桶页前使路由清单失效；普通 recipes 重跑不会重新生成分桶清单。
         Path(VERSION, "Recipes", "routing-manifest.json").unlink(missing_ok=True)
