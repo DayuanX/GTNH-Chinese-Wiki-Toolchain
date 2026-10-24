@@ -6,7 +6,7 @@ Usage:
     python split_all.py                    # all tasks
     python split_all.py items              # Items only
     python split_all.py fluids             # Fluids only
-    python split_all.py oredict            # OreDictionary only
+    python split_all.py oredict            # OreDictionary only (requires generated Items)
     python split_all.py recipes            # Recipes only
     python split_all.py items fluids       # multiple
     python split_all.py --debug            # debug mode (limit output)
@@ -16,6 +16,7 @@ import json
 import os
 import sys
 from collections import Counter, defaultdict
+from itertools import chain
 from pathlib import Path
 from data_version import local_mod_name, source_directory, version_tag
 from item_names import build_artifacts, image_name_config, read_items
@@ -897,6 +898,48 @@ def do_fluids(debug: bool):
     print("=" * 50)
 
 
+def _index_wildcard_item(item, wildcard_index, wildcard_nbt_index=None):
+    """用已导出的完整物品键索引注册名；配方和矿辞共享相同的 damage/NBT 候选范围。"""
+    raw = item.get("rawKey") or item.get("key", "")
+    key = item.get("key", "")
+    if not raw or not key or raw.endswith(":32767"):
+        return
+    base = raw.rsplit(":", 1)[0] if raw.count(":") >= 2 and raw.rsplit(":", 1)[1].isdigit() else raw
+    wildcard_index.setdefault(base, set()).add(key)
+    nbt = item.get("nbt") or ""
+    if nbt and wildcard_nbt_index is not None:
+        wildcard_nbt_index.setdefault((base, nbt_identity(nbt)), set()).add(key)
+
+
+def normalize_ore_dictionary(entries, items):
+    """发布矿辞只引用真实子类型；无候选通配成员写入报告，保留矿辞内其他有效成员。"""
+    wildcard_index, item_keys = {}, set()
+    for item in items:
+        _index_wildcard_item(item, wildcard_index)
+        item_keys.add(item["key"])
+    flat, unresolved, missing_exact = {}, [], []
+    expanded = 0
+    for entry in entries:
+        members, seen = [], set()
+        for key in entry["items"]:
+            if key.endswith(":32767"):
+                candidates = sorted(wildcard_index.get(key[:-6], ()))
+                expanded += 1
+                if not candidates:
+                    unresolved.append({"oreDict": entry["oreDict"], "key": key})
+            else:
+                candidates = [key]
+                if key not in item_keys:
+                    missing_exact.append({"oreDict": entry["oreDict"], "key": key})
+            for candidate in candidates:
+                if candidate not in seen:
+                    seen.add(candidate)
+                    members.append(candidate)
+        flat[entry["oreDict"]] = members
+    return flat, {"expandedWildcardMembers": expanded, "unresolvedWildcardMembers": unresolved,
+                  "missingExactMembers": missing_exact}
+
+
 def do_oredictionary(debug: bool):
     """Split oreDictionary.json -> OreDictionary/  as flat {oreDict: items} objects"""
     print("=" * 50)
@@ -910,10 +953,20 @@ def do_oredictionary(debug: bool):
     entries = data["oreDictionaries"]
     del data
 
-    # Build flat dict {oreDict_name: items_array}
-    flat: dict[str, list] = {}
-    for entry in entries:
-        flat[entry["oreDict"]] = entry["items"]
+    items_dir = Path(VERSION) / "Items"
+    items = read_items(items_dir)
+    first_item = next(items, None)
+    if first_item is None:
+        raise ValueError(
+            f"矿辞处理需要当前版本非空的 Items 数据：{items_dir}；"
+            "请先运行 python split_all.py items oredict"
+        )
+    flat, report = normalize_ore_dictionary(entries, chain((first_item,), items))
+    Path(AUX_DIR).mkdir(parents=True, exist_ok=True)
+    Path(AUX_DIR, "oredictionary-associations.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"  Expanded {report['expandedWildcardMembers']:,} wildcard member(s); "
+          f"{len(report['unresolvedWildcardMembers']):,} without exported candidates")
 
     keys = list(flat.keys())
     print(f"  Total: {len(keys):,} oreDict keys")
@@ -960,6 +1013,10 @@ def do_oredictionary(debug: bool):
         print(f"  -> {file_idx}.json: {count:,} keys, {size / 1024:.1f} KB (OK)")
         total_out += count
 
+    # 完整重建成功后清理缩减的旧页，防止旧矿辞成员再次参与查询。
+    if not debug:
+        keep = [Path(output_dir, f"{index}.json") for index in range(len(batches))]
+        clear_generated_pages(output_dir, {".json"}, keep)
     print(f"  Done: {total_out:,} keys -> {len(batches)} file(s)\n")
 
 
@@ -1438,11 +1495,7 @@ class _RecipeAssociations:
             rk = item.get("rawKey", "") or item.get("key", "")
             nbt = item.get("nbt", "") or ""
             sk = item.get("key", "")
-            if rk and sk and not rk.endswith(":32767"):
-                base = rk.rsplit(":", 1)[0] if rk.count(":") >= 2 and rk.rsplit(":", 1)[1].isdigit() else rk
-                wildcard_index.setdefault(base, set()).add(sk)
-                if nbt:
-                    wildcard_nbt_index.setdefault((base, nbt_identity(nbt)), set()).add(sk)
+            _index_wildcard_item(item, wildcard_index, wildcard_nbt_index)
             if rk and sk and nbt:
                 nbt_index.setdefault((rk, nbt_identity(nbt)), set()).add(sk)
             query_key = item.get("queryKey") or _bee_query_key(item.get("beeIdentity"))

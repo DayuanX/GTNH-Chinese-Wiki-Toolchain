@@ -10,7 +10,7 @@ import unicodedata
 from collections import defaultdict
 from pathlib import Path
 
-from bounded_json import DEFAULT_MAX_BYTES, map_array_pages, validate_limit, write_bounded
+from bounded_json import DEFAULT_MAX_BYTES, encode_json, map_array_pages, validate_limit, write_bounded
 from routing_hash import BUCKET_COUNT, HASH_ALGORITHM, bucket_id
 from item_buckets import write_item_buckets
 
@@ -217,16 +217,65 @@ def resolve_images(groups, choices, physical_icons=(), items=()):
     return redirects, unresolved, invalid
 
 
-def write_name_index(names, output, max_bytes=DEFAULT_MAX_BYTES):
+def _name_pages(mapping, metadata, identities, max_bytes):
+    """名称及其路由、语义身份同页保存，按新增 JSON 成员的字节增量分页。"""
+    names = {}
+    page_identities = {field: {} for field in identities}
+    shell_size = len(encode_json({**metadata, "names": {}}))
+    size = shell_size
+
+    def content():
+        page = {**metadata, "names": names}
+        page.update((field, values) for field, values in page_identities.items() if values)
+        return encode_json(page)
+
+    for name, keys in mapping.items():
+        # 空候选数组也保留名称，与没有语义身份时的索引行为一致。
+        for key in keys or [None]:
+            values = {field: index[key] for field, index in identities.items()
+                      if isinstance(index.get(key), str) and index[key].strip()}
+            while True:
+                if name in names:
+                    cost = len(encode_json(key)) + bool(names[name]) if key is not None else 0
+                else:
+                    cost = len(encode_json({name: [] if key is None else [key]})) - 2 + bool(names)
+                for field, value in values.items():
+                    current = page_identities[field]
+                    if key not in current:
+                        cost += len(encode_json({key: value})) - 2 + bool(current)
+                        if not current:
+                            cost += len(encode_json({field: {}})) - 1
+                if size + cost <= max_bytes:
+                    break
+                if not names:
+                    raise ValueError(f"单条名称及查询身份含 metadata 后超过分页上限: {size + cost} > {max_bytes}")
+                yield content()
+                names, size = {}, shell_size
+                page_identities = {field: {} for field in identities}
+            names.setdefault(name, [])
+            if key is not None:
+                names[name].append(key)
+            for field, value in values.items():
+                page_identities[field][key] = value
+            size += cost
+    if names:
+        yield content()
+
+
+def write_name_index(names, output, max_bytes=DEFAULT_MAX_BYTES, *, query_keys=None, raw_keys=None):
     validate_limit(max_bytes)
     output = Path(output)
     metadata = {"hashAlgorithm": HASH_ALGORITHM, "bucketCount": BUCKET_COUNT}
+    identities = {field: values for field, values in
+                  (("rawKeys", raw_keys), ("queryKeys", query_keys)) if values}
     grouped = defaultdict(dict)
     for name, keys in names.items():
         grouped[bucket_id(name)][name] = keys
     written = set()
     for bucket, mapping in sorted(grouped.items()):
-        for part, content in enumerate(map_array_pages(mapping, metadata, "names", max_bytes)):
+        pages = (_name_pages(mapping, metadata, identities, max_bytes) if identities else
+                 map_array_pages(mapping, metadata, "names", max_bytes))
+        for part, content in enumerate(pages):
             path = output / bucket / f"{part}.json"
             write_bounded(path, content, max_bytes)
             written.add(path)
@@ -244,7 +293,13 @@ def build_artifacts(items, version_dir, state_dir, source_dir, config, icon_sour
     names, groups = collect_names(items)
     physical_icons = (path.name for path in (Path(source_dir) / "icons").glob("*.png"))
     redirects, unresolved, invalid = resolve_images(groups, load_choices(config), physical_icons, items)
-    count = write_name_index(names, Path(version_dir) / "ItemNames")
+    # 轻量身份支持名称查询和配方路由，完整 NBT 留在 Items 中供状态核对。
+    query_keys = {item["key"]: item["queryKey"] for item in items
+                  if item.get("key") and isinstance(item.get("queryKey"), str) and item["queryKey"].strip()}
+    raw_keys = {item["key"]: item["rawKey"] for item in items
+                if item.get("key") and isinstance(item.get("rawKey"), str) and item["rawKey"].strip()
+                and item["rawKey"] != item["key"]}
+    count = write_name_index(names, Path(version_dir) / "ItemNames", query_keys=query_keys, raw_keys=raw_keys)
     item_dir = Path(version_dir) / "Items"
     item_file_count = (write_item_buckets(items, item_dir) if write_items else
                        sum(path.stem.isdecimal() for path in item_dir.rglob("*.tabx")))

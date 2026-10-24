@@ -1,29 +1,29 @@
-"""按已完成 NBT 关联的查询 key 将已适配配方池原位改为分桶分页。"""
+"""按输出 rawKey 将已适配配方池原位改为分桶分页。"""
 
 import json
 from collections import defaultdict
 from pathlib import Path
 
 from bounded_json import DEFAULT_MAX_BYTES, HARD_MAX_BYTES, validate_limit, write_array_pages, write_bounded
-from routing_hash import BUCKET_COUNT, HASH_ALGORITHM, bucket_id
+from routing_hash import HASH_ALGORITHM, bucket_id
 
 ROUTE_FIELDS = ("outputItems", "outputFluids")
 
 
-def output_keys(value):
-    """只读取最终输出 key；queryKey 保留为数据，不参与物理路由。"""
+def output_route_keys(value):
+    """同一注册名、damage 的 NBT 产物共用路由，完整 key 留在配方中供精确匹配。"""
     if isinstance(value, str) and value:
         yield value
     elif isinstance(value, list):
         for entry in value:
-            yield from output_keys(entry)
+            yield from output_route_keys(entry)
     elif isinstance(value, dict):
-        yield from output_keys(value.get("key"))
+        yield from output_route_keys(value.get("rawKey") or value.get("key"))
 
 
-def recipe_route(recipe):
-    keys = {key for field in ROUTE_FIELDS for key in output_keys(recipe.get(field))}
-    return bucket_id(next(iter(keys))) if len(keys) == 1 else None
+def recipe_route(recipe, bucket_count):
+    keys = {key for field in ROUTE_FIELDS for key in output_route_keys(recipe.get(field))}
+    return bucket_id(next(iter(keys)), bucket_count) if len(keys) == 1 else None
 
 
 def output_slots(recipe):
@@ -41,6 +41,17 @@ SUPPORTED_HANDLERS = {
     "gregtech/GTNEIDefaultHandler_alloy_smelter_recycling": "合金炉回收",
     "gregtech/GTNEIDefaultHandler_fluidsolidifier": "流体固化器",
     "gregtech/GTNEIDefaultHandler_hammer": "锻造锤",
+}
+# 按各池数据量选取桶数；是否生成仍由来源文件数与输出形态决定。
+HANDLER_BUCKET_COUNTS = {
+    "minecraft/ShapedRecipeHandler_crafting": 64,
+    "minecraft/ShapelessRecipeHandler_crafting": 64,
+    "gregtech/GTNEIDefaultHandler_tic_bolt_molding": 32,
+    "gregtech/GTNEIDefaultHandler_tic_part_extruding": 16,
+    "gregtech/GTNEIDefaultHandler_assembler": 16,
+    "gregtech/GTNEIDefaultHandler_alloy_smelter_recycling": 16,
+    "gregtech/GTNEIDefaultHandler_fluidsolidifier": 64,
+    "gregtech/GTNEIDefaultHandler_hammer": 16,
 }
 HAMMER = "gregtech/GTNEIDefaultHandler_hammer"
 
@@ -60,13 +71,14 @@ def build_recipe_buckets(version_dir, max_bytes=DEFAULT_MAX_BYTES):
         directory = source / handler
         for child in directory.iterdir() if directory.is_dir() else ():
             if child.is_dir() and (child.name == "shared" or
-                                   len(child.name) == 2 and child.name.isdecimal()):
+                                   child.name.isdecimal()):
                 if any(path.stem.isdecimal() for path in child.glob("*.json")):
                     raise ValueError(f"配方池已分桶，请从原始来源重新生成后再分桶: {handler}")
     written, handlers, skipped = set(), {}, {}
     replaced_files = []
     total = written_recipes = shared = 0
     for handler, name in SUPPORTED_HANDLERS.items():
+        bucket_count = HANDLER_BUCKET_COUNTS[handler]
         files = sorted((path for path in (source / handler).glob("[0-9]*.json")
                         if path.stem.isdecimal()), key=lambda path: int(path.stem))
         if len(files) <= 1:
@@ -82,24 +94,25 @@ def build_recipe_buckets(version_dir, max_bytes=DEFAULT_MAX_BYTES):
                 # 不扩展到辅助字段或其他多输出结构；形态变化时整池退回原文件。
                 if recipe.get("otherItems") or not slots:
                     invalid = True
-                if slots == 1 and recipe_route(recipe) is None:
+                if slots == 1 and recipe_route(recipe, bucket_count) is None:
                     invalid = True
                 if slots != 1 and handler != HAMMER:
                     invalid = True
                 entries.append(recipe)
         if invalid:
-            skipped[handler] = "输出形态或非唯一 final key 超出本次范围，保留原文件"
+            skipped[handler] = "输出形态或非唯一 rawKey 超出本次范围，保留原文件"
             continue
         grouped = defaultdict(list)
         for recipe in entries:
-            route = "shared" if output_slots(recipe) > 1 else recipe_route(recipe)
+            route = "shared" if output_slots(recipe) > 1 else recipe_route(recipe, bucket_count)
             shared += route == "shared"
             total += 1
             grouped[route].append(recipe)
             written_recipes += 1
         metadata["routing"] = {
-            "hashAlgorithm": HASH_ALGORITHM, "bucketCount": BUCKET_COUNT,
-            "fields": list(ROUTE_FIELDS), "identityFields": ["key"],
+            "hashAlgorithm": HASH_ALGORITHM, "bucketCount": bucket_count,
+            # 身份字段按顺序取首个非空值：rawKey 优先，基础物品可直接使用 key。
+            "fields": list(ROUTE_FIELDS), "identityFields": ["rawKey", "key"],
             "sharedDirectory": "shared" if handler == HAMMER else None,
         }
         routes = {}
@@ -109,12 +122,13 @@ def build_recipe_buckets(version_dir, max_bytes=DEFAULT_MAX_BYTES):
             routes[route] = [path.relative_to(output).as_posix() for path in paths]
         replaced_files.extend(files)
         handlers[handler] = {
-            "name": name, "sourceFiles": [path.relative_to(source).as_posix() for path in files],
+            "name": name, "bucketCount": bucket_count, "sourceFiles": [path.relative_to(source).as_posix() for path in files],
             "sourceRecipes": len(entries), "routes": routes,
         }
     report = {
         "sourceRecipes": total, "writtenRecipes": written_recipes, "sharedRecipes": shared,
-        "files": len(written), "hashAlgorithm": HASH_ALGORITHM, "bucketCount": BUCKET_COUNT,
+        "files": len(written), "hashAlgorithm": HASH_ALGORITHM,
+        "recipeBuckets": {handler: details["bucketCount"] for handler, details in handlers.items()},
         "handlers": handlers, "skipped": skipped,
     }
     output.mkdir(parents=True, exist_ok=True)

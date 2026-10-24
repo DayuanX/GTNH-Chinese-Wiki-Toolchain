@@ -74,6 +74,19 @@ python image_upload.py
 python image_redirect.py
 ```
 
+## 矿辞与物品依赖
+
+`split_all.py oredict` 使用当前模组、版本已生成的 `Items` 分页（JSON 或 TABX），
+将 `:32767` 通配成员展开为实际导出的 damage/NBT 物品 key。首次处理该版本时运行：
+
+```bash
+python split_all.py items oredict
+```
+
+Items 目录缺失、没有分页或分页中没有物品记录时，矿辞处理会报错，保留已有矿辞页和
+`oredictionary-associations.json` 报告。Items 生成成功后才可单独运行 `python split_all.py oredict`；
+物品数据变化后应先重新生成 Items。默认的 `python split_all.py` 已按 Items、矿辞的顺序执行。
+
 ## 配方输入与输出归类
 
 `split_all.py recipes` 在关联物品 NBT 和切分页面前，使用 `recipe_roles.py` 按配方来源归类
@@ -177,6 +190,14 @@ GT 电池箱按 tooltip 选择 1 槽版本。多个流体优先选择 `registere
 
 `names[中文名]` 的数组使用物品预处理结束后的最终 `key`，包含仍然需要的 NBT 哈希后缀。
 索引保留同名的全部候选，中文图片重定向单独应用人工选择。
+名称页同时提供两类轻量身份，取自同版本的预处理 Items：
+
+- `rawKeys`：`{"完整key":"rawKey"}`，保存注册名和 damage，用于配方分桶路由。只记录 `rawKey` 与完整 key 不同的候选，其余候选直接使用完整 key。
+- `queryKeys`：`{"完整key":"语义queryKey"}`，保存物品已有的非空语义身份，例如蜜蜂物种。
+
+这两个对象只包含本页 `names` 引用的 key；同一 key 出现在多个分页时，各页均携带其身份映射。
+空对象省略。完整 key 用于读取名称、图片和 NBT；名称索引只携带查询所需的身份字段。
+分页大小计入名称、身份映射及元数据的最终 UTF-8 字节数，每页严格不超过 2,000,000 字节。
 每页 `names` 是对象，可直接用 `names[中文名]` 取得完整 key 数组。同一名称的超大数组可以跨页，
 每页同名只出现一次；查询时合并所有分页中该名称的数组并去重。
 普通名称可在 MongoDB projection 中指定 `names.铁锭`，但必须通过 `find` 获取该桶的全部匹配分页，
@@ -203,29 +224,44 @@ python split_all.py items recipes --recipe-buckets
 未启用分桶或不在适配范围的配方池仍使用 `Recipes/<原机器目录>/<分块号>.json`。
 范围固定为有序合成、无序合成、匠魂弩箭固化、匠魂部件压模、组装机、合金炉回收、流体固化器、锻造锤
 这八个主要 handler，并且只在当前来源已拆成多个文件时处理。其他 handler 保留原文件。
-输入为关联完成后的产物 `key`；仍带有未关联 NBT 的产物按基础 `key` 路由，NBT 原样保留。
-单输出槽允许物品或流体；嵌套候选须归约为同一个最终 key。
+输入为关联完成后的产物 `rawKey`，缺省时使用产物 `key`；同一注册名和 damage 的 NBT 变体共用一个逻辑桶。
+完整 `key`、NBT 和 `queryKey` 原样保存在配方中，供精确匹配与显示使用。
+单输出槽允许物品或流体；嵌套候选须归约为同一个路由身份。
 锻造锤的多输出配方单独写入该 handler 的 `shared/<页>.json`；查询锻造锤时同时读取目标桶与 shared 目录的全部数字分块。
 其余七个 handler 若出现多输出、`otherItems` 或无可识别输出，整池保留原文件，诊断写入 manifest。
-普通配方仅按唯一的最终输出 `key` 写入一个桶，`queryKey` 只保留在记录中，不参与路由。
-同槽候选若均为同一个最终 key 可归同桶；存在多个唯一 key 或没有最终 key 时，整池保留顺序分页。
+每条配方写入一个桶。同槽候选的完整 key 可以不同，只要其 `rawKey` 相同即可归同桶；
+存在多个路由身份或没有可识别身份时，整池保留顺序分页。
 记录保留原 `index`；按 `(handler, index)` 识别记录，按 index 的数字页号、行号排序。
 `Recipes/routing-manifest.json` 的 `writtenRecipes` 记录实际写入条数，并列出处理的 handler、原文件、分桶文件和共享文件，便于读取端定位。读取配方时遍历清单指向的数据文件。
+各 handler 的逻辑桶数如下；少于两个来源文件或输出形态不符时保留顺序分页。
+
+| 配方池 | 桶数 |
+| --- | ---: |
+| 有序合成 | 64 |
+| 匠魂弩箭固化 | 32 |
+| 匠魂部件压模、组装机、合金炉回收、锻造锤 | 16 |
+| 无序合成、流体固化器 | 64 |
+
+每个配方页的 `routing.bucketCount` 和清单的 `handlers[handler].bucketCount` 标明该池桶数。
+`routing.identityFields` 为 `["rawKey", "key"]`，表示按此顺序取首个非空字段作为路由身份。
+清单的 `recipeBuckets` 为 `{handler: 桶数}`，只包含本次实际生成的池；读取端用此表同步路由配置。
+
 重新生成分桶时，从原始 dumps 运行 `split_all.py`。分桶器接受顺序分页的配方文件。
 
 查询端读取目标桶后，按原有条件匹配、排序和分页；未指定产物时需遍历该配方池的全部数据文件。
 
 ### 分块哈希约定
 
-名称索引以名称为输入，物品与配方分桶以最终查询 key 为输入。三者共用 `routing_hash.bucket_id(text, bucket_count=64)`；物品显式传入 `ITEM_BUCKET_COUNT=128`，名称与配方使用默认 64。JSON/TABX 页的 `bucketCount` 标明实际桶数，哈希算法不变：
+名称索引以中文名为输入，物品分桶以完整 `key` 为输入，配方分桶以产物 `rawKey`（缺省时为 `key`）为输入。
+三者共用 `routing_hash.bucket_id(text, bucket_count=64)`；物品显式传入 `ITEM_BUCKET_COUNT=128`，名称使用默认 64，配方显式传入对应 handler 的桶数。JSON/TABX 页的 `bucketCount` 标明实际桶数，哈希算法不变：
 
 1. 对输入的 UTF-8 字节计算 SHA-256。
 2. 前后各 16 字节逐字节异或。
 3. 按 Dumper 的 `0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ` 字符表，保留低 15 位 Base62，左侧补零。
-4. 名称和配方将该 15 位值对 64 取模，输出 `00` 至 `63`；物品对 128 取模，输出 `00` 至 `99`、`100` 至 `127`。
+4. 名称将该 15 位值对 64 取模，配方按 handler 的桶数取模；物品对 128 取模。桶号至少两位，例如 `00`、`63`、`100`、`127`。
 
 前三步与当前 Dumper 的 NBT 后缀算法一致，测试包含现有 `{}` → `gLuB0gegBqh1aRe` 向量。
-对于 64 或 128 桶，桶号也等于
+对于 16、32、64 或 128 桶，桶号也等于
 `(digest[15] XOR digest[31]) % bucketCount`（字节从 0 计数），因此无需在 Lua 中用浮点数表示完整哈希整数。
 
 ## 独立 mod 版本数据
@@ -250,7 +286,7 @@ python data_upload.py
 
 ### 分桶文件大小限制
 
-`Items` 使用 128 个逻辑桶（JSON 和 TABX 一致），`ItemNames` 与已启用分桶的 `Recipes` 使用 64 个逻辑桶；每桶按需生成多个数字分页。
+`Items` 使用 128 个逻辑桶（JSON 和 TABX 一致），`ItemNames` 使用 64 个逻辑桶，`Recipes` 使用各 handler 配置的桶数；每桶按需生成多个数字分页。
 默认分页上限为 **1,800,000 字节**；可调参数 `max_bytes` 必须为正整数且不得超过硬上限
 **2,000,000 字节**（十进制 2 MB）。所有页面按最终紧凑 JSON 的 UTF-8 字节数分页，
 计入中文、emoji、metadata、括号和逗号；写入前再次检查完整字节长度。

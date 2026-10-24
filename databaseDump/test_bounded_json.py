@@ -164,6 +164,16 @@ class BoundedJsonTests(unittest.TestCase):
         self.assertTrue((source / '0.json').exists(), 'Failed generation must retain original pages')
         self.assertTrue(all(path.stat().st_size <= HARD_MAX_BYTES for path in self.root.rglob('*.json')))
 
+    def test_recipe_repeat_detects_three_digit_bucket_without_changes(self):
+        source = self.root / 'Recipes/minecraft/ShapedRecipeHandler_crafting/100'
+        source.mkdir(parents=True)
+        page = source / '0.json'
+        page.write_bytes(encode_json({'recipes': [{'outputItems': ['key']}]}))
+        before = {path: path.read_bytes() for path in self.root.rglob('*.json')}
+        with self.assertRaisesRegex(ValueError, '已分桶'):
+            build_recipe_buckets(self.root)
+        self.assertEqual({path: path.read_bytes() for path in self.root.rglob('*.json')}, before)
+
     def test_recipe_buckets_replace_flat_pages_and_repeat_refuses_without_changes(self):
         handler = 'minecraft/ShapedRecipeHandler_crafting'
         source = self.root / 'Recipes' / handler

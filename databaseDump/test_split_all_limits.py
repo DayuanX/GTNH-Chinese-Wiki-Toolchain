@@ -28,6 +28,93 @@ class SplitOutputTests(unittest.TestCase):
         context.start()
         self.addCleanup(context.stop)
 
+    def test_oredictionary_wildcards_expand_real_damage_and_nbt_keys(self):
+        items = [
+            {"key": "example:item", "rawKey": "example:item"},
+            {"key": "example:item:9", "rawKey": "example:item:9"},
+            {"key": "example:item:9_hash", "rawKey": "example:item:9", "nbt": "{v:1}"},
+            {"key": "example:item:32767", "rawKey": "example:item:32767"},
+        ]
+        entries = [{"oreDict": "ore", "items": ["example:item:32767", "example:item:9", "example:missing:32767", "example:other"]}]
+        flat, report = split_all.normalize_ore_dictionary(entries, items)
+        self.assertEqual(flat, {"ore": ["example:item", "example:item:9", "example:item:9_hash", "example:other"]})
+        self.assertEqual(report['expandedWildcardMembers'], 2)
+        self.assertEqual(report['unresolvedWildcardMembers'], [{"oreDict": "ore", "key": "example:missing:32767"}])
+        second, second_report = split_all.normalize_ore_dictionary(
+            [{"oreDict": key, "items": values} for key, values in flat.items()], items)
+        self.assertEqual(second, flat)
+        self.assertEqual(second_report['expandedWildcardMembers'], 0)
+
+    def test_oredictionary_writer_reports_missing_and_respects_hard_limit(self):
+        (self.version / "Items/0.json").write_bytes(encode_json({"items": [
+            {"key": "example:critter:1", "rawKey": "example:critter:1"}]}))
+        (self.source / "oreDictionary.json").write_bytes(encode_json({"oreDictionaries": [
+            {"oreDict": "critter", "items": ["example:old:32767", "example:critter:32767"]}]}))
+        split_all.do_oredictionary(False)
+        page = self.version / "OreDictionary/0.json"
+        self.assertEqual(json.loads(page.read_bytes()), {"critter": ["example:critter:1"]})
+        self.assertLessEqual(page.stat().st_size, HARD_MAX_BYTES)
+        report = json.loads((self.state / "oredictionary-associations.json").read_bytes())
+        self.assertEqual(len(report['unresolvedWildcardMembers']), 1)
+        (self.source / "oreDictionary.json").write_bytes(encode_json({"oreDictionaries": [
+            {"oreDict": "huge", "items": ["x" * HARD_MAX_BYTES]}]}))
+        previous = page.read_bytes()
+        with self.assertRaisesRegex(ValueError, "超过分页上限"):
+            split_all.do_oredictionary(False)
+        self.assertEqual(page.read_bytes(), previous)
+
+    def test_oredictionary_requires_nonempty_items_before_changing_pages_or_report(self):
+        (self.source / "oreDictionary.json").write_bytes(encode_json({"oreDictionaries": [
+            {"oreDict": "ore", "items": ["example:item:32767"]}]}))
+        report = self.state / "oredictionary-associations.json"
+        report.write_bytes(b"previous report")
+        for case in ("missing-directory", "no-pages", "empty-json", "empty-tabx"):
+            with self.subTest(case=case):
+                version = self.root / case
+                items_dir = version / "Items"
+                if case != "missing-directory":
+                    items_dir.mkdir(parents=True)
+                if case == "empty-json":
+                    (items_dir / "0.json").write_bytes(encode_json({"items": []}))
+                elif case == "empty-tabx":
+                    (items_dir / "0.tabx").write_bytes(encode_json({
+                        "schema": {"fields": [{"name": "key", "type": "string"}]}, "data": []}))
+                output = version / "OreDictionary"
+                output.mkdir(parents=True)
+                previous = {"0.json": b"previous first page", "1.json": b"previous second page"}
+                for name, content in previous.items():
+                    (output / name).write_bytes(content)
+
+                with patch.object(split_all, "VERSION", str(version)):
+                    with self.assertRaisesRegex(ValueError, "非空的 Items 数据.*python split_all.py items oredict"):
+                        split_all.do_oredictionary(False)
+
+                self.assertEqual({path.name: path.read_bytes() for path in output.iterdir()}, previous)
+                self.assertEqual(report.read_bytes(), b"previous report")
+
+    def test_oredictionary_removes_obsolete_pages_only_after_full_success(self):
+        (self.version / "Items/0.json").write_bytes(encode_json({"items": [{"key": "example:one"}]}))
+        source = self.source / "oreDictionary.json"
+        source.write_bytes(encode_json({"oreDictionaries": [
+            {"oreDict": "first", "items": ["example:one"]},
+            {"oreDict": "second", "items": ["example:two"]}]}))
+        with patch.object(split_all, "MAX_FILE_SIZE", 35):
+            split_all.do_oredictionary(False)
+        output = self.version / "OreDictionary"
+        self.assertTrue((output / "1.json").exists())
+        marker = output / "manifest.json"
+        marker.write_bytes(b'{}')
+        source.write_bytes(encode_json({"oreDictionaries": [{"oreDict": "first", "items": []}]}))
+        split_all.do_oredictionary(True)
+        self.assertTrue((output / "1.json").exists())
+        with patch.object(split_all, "write_version_json", side_effect=ValueError("test write failure")):
+            with self.assertRaisesRegex(ValueError, "test write failure"):
+                split_all.do_oredictionary(False)
+        self.assertTrue((output / "1.json").exists())
+        split_all.do_oredictionary(False)
+        self.assertEqual([path.name for path in output.glob('*.json') if path.stem.isdecimal()], ['0.json'])
+        self.assertTrue(marker.exists())
+
     def test_batch_writer_preserves_ranges_indexes_and_exact_utf8(self):
         items = [{"key": "example:一", "value": "中文😀"}, {"key": "example:two"}, {"key": "example:three"}]
         output = self.version / "Aspects"
