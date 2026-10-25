@@ -87,6 +87,27 @@ Items 目录缺失、没有分页或分页中没有物品记录时，矿辞处�
 `oredictionary-associations.json` 报告。Items 生成成功后才可单独运行 `python split_all.py oredict`；
 物品数据变化后应先重新生成 Items。默认的 `python split_all.py` 已按 Items、矿辞的顺序执行。
 
+## 神秘时代研究表
+
+默认拆分任务包含研究表，也可单独运行 `python split_all.py tc4research`。
+它将当前数据源的 `tc4research.json` 写为
+`Data:Versions/<远端模组名>/<版本>/Tc4research/0.json` 等数字分页，
+保留 `tc4Researches` 数组及研究原字段。每页按最终 UTF-8 字节分页，严格限制在 2,000,000 字节以内。
+
+每次运行处理 `.env` 中选择的一个模组与版本。`MOD_LOCAL_NAME=GTNH` 时读取完整研究表，
+排除 [config/addon-mods.json](config/addon-mods.json) 列出的额外附属来源；
+Thaumcraft、dreamcraft、KekzTech 等基础包模组和缺少来源字段的旧记录保留。
+公共列表填写注册 Mod ID，目前包含 `TwistSpaceTechnology`、`sciencenotleisure` 和
+`programmablehatches`，供数据范围划分复用，目前用于研究表。
+
+处理附属时，`MOD_LOCAL_NAME` 填注册 Mod ID，`MOD_REMOTE_NAME`、`MOD_VERSION` 指定目标目录。
+附属优先读取自身 filtered 目录里的研究表；缺少独立导出时，从完整研究表按
+`sourceMod` 精确选择注册者，比较时忽略大小写。该字段由 Dumper 在研究注册时记录，研究可以位于任意分类。
+尚无该附属的 filtered 目录时，使用 `python split_all.py tc4research` 单独处理研究；
+默认全部任务及其他任务需要附属自己的数据目录。
+完整旧导出尚无来源字段时跳过附属提取，已有独立 filtered 研究表继续使用。
+新增额外附属时，将注册 ID 加入公共列表，再分别处理 GTNH 和该附属的目标版本。
+
 ## 配方输入与输出归类
 
 `split_all.py recipes` 在关联物品 NBT 和切分页面前，使用 `recipe_roles.py` 按配方来源归类

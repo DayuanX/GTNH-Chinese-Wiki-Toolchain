@@ -1,6 +1,6 @@
 """
 split_all.py
-Unified splitter for Items / Fluids / OreDictionary / Recipes.
+Unified splitter for Items / Fluids / OreDictionary / Recipes / Research.
 
 Usage:
     python split_all.py                    # all tasks
@@ -8,6 +8,7 @@ Usage:
     python split_all.py fluids             # Fluids only
     python split_all.py oredict            # OreDictionary only (requires generated Items)
     python split_all.py recipes            # Recipes only
+    python split_all.py tc4research        # Thaumcraft research only
     python split_all.py items fluids       # multiple
     python split_all.py --debug            # debug mode (limit output)
 """
@@ -18,7 +19,7 @@ import sys
 from collections import Counter, defaultdict
 from itertools import chain
 from pathlib import Path
-from data_version import local_mod_name, source_directory, version_tag
+from data_version import addon_mods, local_mod_name, source_directory, version_tag
 from item_names import build_artifacts, image_name_config, read_items
 from nbt_identity import nbt_identity
 from bounded_json import HARD_MAX_BYTES, DEFAULT_MAX_BYTES, array_pages, encode_json, write_bounded
@@ -1388,6 +1389,43 @@ def do_ticmaterial(debug: bool):
     _split_flat_dict_impl(data, os.path.join(VERSION, "Ticmaterial"), debug)
 
 
+def do_tc4research(debug: bool):
+    """按当前数据源分页研究表，保留 tc4Researches 及每条研究的原字段。"""
+    source = Path(DUMPS_DIR) / "tc4research.json"
+    mod = local_mod_name()
+    select_owner = False
+    if not source.is_file() or not source.stat().st_size:
+        # 完整导出记录注册者后，附属可直接提取自己的研究，省去逐模组启动游戏。
+        source = Path(REFERENCE_DUMPS_DIR) / "tc4research.json"
+        if not mod or mod == "GTNH" or not source.is_file() or not source.stat().st_size:
+            print(f"跳过缺失或空的研究输入: {Path(DUMPS_DIR) / 'tc4research.json'}")
+            return
+        select_owner = True
+    data = json.loads(source.read_text(encoding="utf-8"))
+    records = data["tc4Researches"]
+    if mod == "GTNH":
+        excluded = addon_mods()
+        records = [row for row in records if (row.get("sourceMod") or "").casefold() not in excluded]
+    elif select_owner:
+        if records and not any(row.get("sourceMod") for row in records):
+            print(f"跳过 {mod} 研究：完整导出尚未记录 sourceMod")
+            return
+        records = [row for row in records if (row.get("sourceMod") or "").casefold() == mod.casefold()]
+        print(f"  [Tc4research] {mod}: selected {len(records)} by sourceMod")
+    output = Path(VERSION) / "Tc4research"
+    written = []
+    for part, content in enumerate(array_pages(
+            records, data, "tc4Researches", DEFAULT_MAX_BYTES, emit_empty=True)):
+        path = output / f"{part}.json"
+        write_bounded(path, content, HARD_MAX_BYTES)
+        written.append(path)
+        if debug and len(written) == 5:
+            break
+    if not debug:
+        clear_generated_pages(output, {".json"}, keep=written)
+    print(f"  [Tc4research] {len(records):,} researches -> {len(written)} file(s)")
+
+
 def _fix_recipe_format(recipes: list, filepath: str) -> list:
     """修正非标准 NEI recipe 格式为标准格式。
     如果配方已经是标准格式（有 outputFluids / inputFluids / outputItems），
@@ -1764,6 +1802,7 @@ TASKS = {
     "recipes":    ("Recipes",      do_recipes),
     "gtmaterial": ("GtMaterial",   do_gtmaterial),
     "ticmaterial":("TicMaterial",  do_ticmaterial),
+    "tc4research":("Tc4research", do_tc4research),
 }
 
 STANDALONE_TASKS = {
@@ -1825,13 +1864,19 @@ def _rename_all():
     pass
 
 
-def configure_source():
+def configure_source(require_source: bool = True):
+    """配置当前模组的数据源；单独处理研究时允许从完整表按来源提取。"""
     global DUMPS_DIR, REFERENCE_DUMPS_DIR, VERSION_TAG, VERSION, AUX_DIR
     VERSION_TAG = version_tag(required=True)
     mod, version = VERSION_TAG.split("/")
     local_mod = local_mod_name(required=True)
     REFERENCE_DUMPS_DIR = str(source_directory(os.environ.get("DUMPS_DIR", ""), "GTNH"))
-    DUMPS_DIR = str(source_directory(REFERENCE_DUMPS_DIR, local_mod))
+    DUMPS_DIR = str(source_directory(REFERENCE_DUMPS_DIR, local_mod, check_exists=False))
+    if require_source and not Path(DUMPS_DIR).is_dir():
+        raise ValueError(
+            f"数据源目录不存在: {DUMPS_DIR}。"
+            "仅处理研究时可运行 python split_all.py tc4research，从完整导出按来源提取。"
+        )
     VERSION = os.path.join(_PROJECT_ROOT, "wikitext", "Data", "Versions", mod, version)
     # NBT 判断依赖当前模组的配方，不能复用其他模组的扫描缓存。
     AUX_DIR = os.path.join(_PROJECT_ROOT, "databaseDump", "source_state", local_mod, version)
@@ -1839,7 +1884,6 @@ def configure_source():
 
 
 def main():
-    configure_source()
     debug = "--debug" in sys.argv
     tabx = "--tabx" in sys.argv
     args = [a.lower() for a in sys.argv[1:] if not a.startswith("--")]
@@ -1854,6 +1898,7 @@ def main():
             print(f"Unknown task(s): {unknown}")
             print(f"Available: {', '.join(all_tasks.keys())}")
             return
+    configure_source(require_source=any(key != "tc4research" for key in tasks_to_run))
     if debug:
         print("[DEBUG mode]\n")
     if tabx:

@@ -1,7 +1,14 @@
 """数据页的模组名与版本配置（调用方先加载 .env）。"""
 
+import json
 import os
 from pathlib import Path
+
+
+def addon_mods() -> set[str]:
+    """额外附属的注册 Mod ID；用于从基础整合包数据中划分附属范围。"""
+    path = Path(__file__).parent / "config" / "addon-mods.json"
+    return {mod.casefold() for mod in json.loads(path.read_text(encoding="utf-8"))}
 
 
 def title_part(value: str) -> str:
