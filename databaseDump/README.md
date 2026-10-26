@@ -176,6 +176,21 @@ GT 电池箱按 tooltip 选择 1 槽版本。多个流体优先选择 `registere
 同模组不同注册物品、没有零 damage 且无专门规则的多个子类型仍留给人工。
 矿石规则适用于 GT `gt.blockores2`～`gt.blockores7`。
 
+需要先为剩余冲突生成一版可编辑的默认清单时，使用同次导出的 `itemicon.json`：
+
+```bash
+python item_names.py generate-preferred --items-dir <预处理的Items目录> \
+  --icon-map <导出目录>/itemicon.json --output preferred-items.generated.json
+```
+
+该命令保留已有人工选择和显式 `null`，仅补充现有规则筛选后仍有多个候选的名称，新增条目只保存 `key`。
+在剩余候选中，选择 `itemicon.json` 中最先出现的图标；同图标的多个身份按完整 key 排序。
+这与 Dumper 为中文重名依次分配无编号、` 2`、` 3` 别名时使用的遍历顺序一致，
+不代表物品优劣，且可能随模组版本、注册顺序和配方变体变化。生成结果固定保存完整 key。
+规则已唯一确定的名称继续使用自动规则；缺少候选图标映射时停止生成，需核对数据来源。
+输出是独立的 `schemaVersion: 2` 清单，不覆盖公共首选文件，也不会自动应用。
+可检查生成清单后通过 `IMAGE_NAME_CONFIG` 指定它，再重新预处理。
+
 `null` 表示不发布该中文图片重定向。下面使用演示数据：
 
 ```json
@@ -188,7 +203,8 @@ GT 电池箱按 tooltip 选择 1 槽版本。多个流体优先选择 `registere
 }
 ```
 
-公共清单只保存明确约定，通过 PR 修改 `key` 和选择理由 `reason`。
+公共清单保存已采用的选择，通过 PR 修改 `key`；`reason` 是可选的人工说明。
+当前清单包含 2.9.0-RC-2 本体与附属模组快照中按 Dumper 顺序补齐的默认选择，自动生成的条目只保存 `key`。
 本体与附属共用这份清单。例如“引力透镜”明确选择 GT 物品；独立处理 TST 时，
 所选 GT key 不在候选中，该中文别名会记录到失效选择报告并跳过，TST 图标仍按完整物品身份处理。
 `IMAGE_NAME_CONFIG` 可显式指定同格式的自定义清单，替代默认公共清单。

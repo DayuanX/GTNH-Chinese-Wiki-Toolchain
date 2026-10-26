@@ -8,7 +8,7 @@ from contextlib import closing
 from unittest.mock import patch
 
 from image_state import init_db, pending_redirects, update_state
-from item_names import build_artifacts, collect_names, default_image_candidate, generate_config, load_choices, resolve_images, write_name_index
+from item_names import build_artifacts, collect_names, default_image_candidate, generate_config, generate_preferred_config, load_choices, resolve_images, write_name_index
 from image_version import redirect_map
 from item_buckets import write_item_buckets
 from recipe_buckets import build_recipe_buckets, recipe_route, HANDLER_BUCKET_COUNTS
@@ -261,6 +261,66 @@ class NameRoutingTests(unittest.TestCase):
         redirects, _, invalid = resolve_images(groups, {'铜锭.png': {'key': 'missing'}}, items=items)
         self.assertFalse(redirects)
         self.assertIn('铜锭.png', invalid)
+
+    def test_generated_preferences_use_dumper_order_after_existing_rules(self):
+        items = [
+            {'key': 'minecraft:old', 'translatedName': '冲突', 'iconName': 'old.png', 'tooltips': '已弃用'},
+            {'key': 'gregtech:item:2_nbt', 'rawKey': 'gregtech:item:2', 'nbt': '{a:1}',
+             'translatedName': '冲突', 'iconName': 'nbt.png'},
+            {'key': 'other:early', 'translatedName': '冲突', 'iconName': 'early.png'},
+            {'key': 'gregtech:item:1', 'translatedName': '冲突', 'iconName': 'one.png'},
+            {'key': 'gregtech:item:2', 'translatedName': '冲突', 'iconName': 'two.png'},
+            {'key': 'gregtech:default', 'translatedName': '默认', 'iconName': 'default.png'},
+            {'key': 'other:default', 'translatedName': '默认', 'iconName': 'other.png'},
+            {'key': 'other:manual_a', 'translatedName': '手工', 'iconName': 'manual_a.png'},
+            {'key': 'other:manual_b', 'translatedName': '手工', 'iconName': 'manual_b.png'},
+            {'key': 'other:skip_a', 'translatedName': '跳过', 'iconName': 'skip_a.png'},
+            {'key': 'other:skip_b', 'translatedName': '跳过', 'iconName': 'skip_b.png'},
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, output, icon_map = root / 'config.json', root / 'output.json', root / 'itemicon.json'
+            original = {'schemaVersion': 2, 'choices': {
+                '手工.png': {'key': 'other:manual_b', 'reason': '人工确认'},
+                '跳过.png': {'key': None, 'reason': '不发布'},
+            }}
+            config.write_text(json.dumps(original), 'utf-8')
+            before = config.read_bytes()
+            icon_map.write_text(json.dumps({'shortKey': [{'iconName': icon} for icon in
+                ['old.png', 'nbt.png', 'early.png', 'two.png', 'one.png', 'two.png']]}), 'utf-8')
+            result = generate_preferred_config(items, output, config, icon_map)
+            self.assertEqual(result, generate_preferred_config(list(reversed(items)), output, config, icon_map))
+            self.assertEqual(config.read_bytes(), before)
+            self.assertEqual(json.loads(output.read_text('utf-8')), result)
+            self.assertEqual(set(result['choices']), {'冲突.png', '手工.png', '跳过.png'})
+            for title, choice in original['choices'].items():
+                self.assertEqual(result['choices'][title], choice)
+            self.assertEqual(result['choices']['冲突.png'], {'key': 'gregtech:item:2'})
+            groups = collect_names(items)[1]
+            self.assertIn('冲突.png', resolve_images(groups, original['choices'], items=items)[1])
+            redirects, unresolved, invalid = resolve_images(groups, result['choices'], items=items)
+            self.assertFalse(unresolved or invalid)
+            self.assertEqual(redirects['File:冲突.png'], 'File:two.png')
+            self.assertEqual(redirects['File:默认.png'], 'File:default.png')
+            with self.assertRaisesRegex(ValueError, '不能覆盖'):
+                generate_preferred_config(items, config, config, icon_map)
+
+    def test_generated_preferences_match_transformed_keys_by_icon_and_require_complete_mapping(self):
+        items = [{'key': 'fluid.z', 'translatedName': '同名_流体', 'iconName': 'first.png'},
+                 {'key': 'fluid.a', 'translatedName': '同名 流体', 'iconName': 'second.png'}]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, output, icon_map = root / 'config.json', root / 'output.json', root / 'itemicon.json'
+            icon_map.write_text(json.dumps({'shortKey': [
+                {'shortKey': 'gregtech:display:42', 'iconName': 'first.png'}]}), 'utf-8')
+            with self.assertRaisesRegex(ValueError, '缺少候选'):
+                generate_preferred_config(items, output, config, icon_map)
+            self.assertFalse(output.exists())
+            icon_map.write_text(json.dumps({'shortKey': [
+                {'shortKey': 'gregtech:display:42', 'iconName': 'first.png'},
+                {'shortKey': 'gregtech:display:19', 'iconName': 'second.png'}]}), 'utf-8')
+            result = generate_preferred_config(items, output, config, icon_map)
+            self.assertEqual(result['choices']['同名 流体.png']['key'], 'fluid.z')
 
     def test_gravitational_lens_preference_survives_addon_only_exports(self):
         base = {'key': 'gregtech:gt.metaitem.03:32277', 'translatedName': '引力透镜',

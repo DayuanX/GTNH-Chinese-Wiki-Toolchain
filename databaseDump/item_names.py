@@ -81,8 +81,8 @@ def load_choices(path):
     return data["choices"]
 
 
-def default_image_candidate(items):
-    """按已确认的显示偏好缩减候选；仍有多个身份时交由人工选择。"""
+def filter_image_candidates(items):
+    """按已确认的显示偏好缩减候选，保留仍需选择的全部身份。"""
     candidates = list(items)
     reasons = []
 
@@ -159,7 +159,47 @@ def default_image_candidate(items):
     # 不跨注册物品或 metadata 兜底，也不改变配方的物品身份。
     if len(candidates) > 1 and len({item.get('rawKey', item['key']) for item in candidates}) == 1:
         prefer([min(candidates, key=lambda item: item['key'])], 'nbt-key-order')
+    return candidates, reasons
+
+
+def default_image_candidate(items):
+    """默认规则仅接受唯一候选；仍有多个身份时交由首选清单选择。"""
+    candidates, reasons = filter_image_candidates(items)
     return (candidates[0]['key'] if len(candidates) == 1 else None), reasons
+
+
+def generate_preferred_config(items, path, config, icon_map):
+    """保留人工选择，为规则未解决的名称按 Dumper 图标遍历顺序生成独立清单。"""
+    path, config = Path(path), Path(config)
+    if path.resolve() in {config.resolve(), (Path(__file__).parent / "config/preferred-items.json").resolve()}:
+        raise ValueError("生成清单不能覆盖首选配置")
+    choices = dict(load_choices(config))
+    icon_order = {}
+    for index, row in enumerate(json.loads(Path(icon_map).read_text('utf-8'))['shortKey']):
+        icon_order.setdefault(row['iconName'], index)
+
+    items = list(items)
+    _, groups = collect_names(items)
+    by_key = {item['key']: item for item in items}
+    for title, rows in groups.items():
+        if title in choices:
+            continue
+        candidates, _ = filter_image_candidates([by_key[row['key']] for row in rows])
+        if len(candidates) < 2:
+            continue
+        # 流体等预处理身份可能改写 key；iconName 仍指向同一张原始图标。
+        def order(item):
+            icon = item.get('iconName') or item.get('icon')
+            if icon not in icon_order:
+                raise ValueError(f"Dumper 图标映射缺少候选: {title}: {item['key']} ({icon})")
+            return icon_order[icon], item['key']
+
+        chosen = min(candidates, key=order)
+        choices[title] = {'key': chosen['key']}
+    result = {'schemaVersion': 2, 'choices': dict(sorted(choices.items()))}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', 'utf-8')
+    return result
 
 
 def generate_config(items, path, config):
@@ -336,11 +376,14 @@ def read_items(directory):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["generate-config"])
+    parser.add_argument("command", choices=["generate-config", "generate-preferred"])
     parser.add_argument("--items-dir", type=Path)
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--output", type=Path, default=Path("image-name-candidates.json"))
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--icon-map", type=Path, help="同次导出的 itemicon.json，保留 Dumper 遍历顺序")
     args = parser.parse_args()
+    if args.command == 'generate-preferred' and not args.icon_map:
+        parser.error('generate-preferred 需要 --icon-map 指定同次导出的 itemicon.json')
     if not args.items_dir or not args.config:
         import split_all
         split_all.configure_source()
@@ -349,8 +392,15 @@ def main():
     items = list(read_items(args.items_dir))
     if not items:
         raise ValueError("没有预处理后的物品数据，请先执行 split_all.py items")
-    result = generate_config(items, args.output, args.config)
-    print(f"Generated {len(result['candidates'])} image-name candidates: {args.output}")
+    if args.command == 'generate-preferred':
+        args.output = args.output or Path('preferred-items.generated.json')
+        result = generate_preferred_config(items, args.output, args.config, args.icon_map)
+        added = len(result['choices']) - len(load_choices(args.config))
+        print(f"Generated {added} fallback choices; {len(result['choices'])} total: {args.output}")
+    else:
+        args.output = args.output or Path('image-name-candidates.json')
+        result = generate_config(items, args.output, args.config)
+        print(f"Generated {len(result['candidates'])} image-name candidates: {args.output}")
 
 
 if __name__ == "__main__":
