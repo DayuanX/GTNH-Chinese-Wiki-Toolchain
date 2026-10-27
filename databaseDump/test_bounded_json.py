@@ -8,7 +8,7 @@ from bounded_json import HARD_MAX_BYTES, array_pages, encode_json, map_array_pag
 from item_buckets import write_item_buckets
 from item_names import read_items, write_name_index
 from recipe_buckets import build_recipe_buckets, write_bucket
-from routing_hash import ITEM_BUCKET_COUNT, BUCKET_COUNT, bucket_id, HASH_ALGORITHM
+from routing_hash import bucket_id, HASH_ALGORITHM
 
 
 class BoundedJsonTests(unittest.TestCase):
@@ -63,7 +63,7 @@ class BoundedJsonTests(unittest.TestCase):
 
     def test_item_bucket_exact_size_and_lossless_pagination(self):
         row = {'key': '同一个😀', 'translatedName': '中文😀', 'nbt': 'a' * 30}
-        metadata = {'hashAlgorithm': HASH_ALGORITHM, 'bucketCount': ITEM_BUCKET_COUNT}
+        metadata = {'hashAlgorithm': HASH_ALGORITHM, 'bucketCount': 4}
         limit = len(encode_json({**metadata, 'items': [row]}))
         self.assertEqual(write_item_buckets([row] * 5, self.root, limit), 5)
         self.assertEqual(self.read_records('items', limit), [row] * 5)
@@ -85,19 +85,19 @@ class BoundedJsonTests(unittest.TestCase):
         note.unlink()
         self.assertEqual(list(read_items(self.root)), rows)
 
-    def test_item_128_bucket_metadata_and_three_digit_cleanup(self):
+    def test_bucket_hash_and_shrink_cleanup(self):
         import hashlib
         key = next(f'mod:item{i}' for i in range(5000) if bucket_id(f'mod:item{i}', 128) == '100')
         checksum = hashlib.sha256(key.encode('utf8')).digest()
         self.assertEqual(bucket_id(key, 128), f'{(checksum[15] ^ checksum[31]) % 128:02d}')
-        self.assertEqual(bucket_id(key), f'{(checksum[15] ^ checksum[31]) % 64:02d}')
+        self.assertEqual(bucket_id(key, 64), f'{(checksum[15] ^ checksum[31]) % 64:02d}')
         for name in ('63/0.json', '100/8.json', '127/0.json'):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b'{}')
         write_item_buckets([{'key': key}], self.root)
-        self.assertEqual([p.relative_to(self.root).as_posix() for p in self.root.rglob('*.json')], ['100/0.json'])
-        self.assertEqual(json.loads((self.root / '100/0.json').read_bytes())['bucketCount'], 128)
+        self.assertEqual([p.relative_to(self.root).as_posix() for p in self.root.rglob('*.json')], ['00/0.json'])
+        self.assertEqual(json.loads((self.root / '00/0.json').read_bytes())['bucketCount'], 1)
         write_item_buckets([], self.root)
         self.assertFalse(list(self.root.rglob('*.json')))
 
@@ -113,13 +113,13 @@ class BoundedJsonTests(unittest.TestCase):
     def test_name_keys_split_losslessly_at_exact_boundary(self):
         name = '重名😀'
         keys = [f'键😀{i:02d}' for i in range(20)]
-        metadata = {'hashAlgorithm': HASH_ALGORITHM, 'bucketCount': BUCKET_COUNT}
-        limit = len(encode_json({**metadata, 'names': {name: keys[:2]}}))
+        metadata = {'bucketCount': 1}
+        limit = len(encode_json({**metadata, 'names': {name: {'keys': keys[:2]}}}))
         self.assertEqual(write_name_index({name: keys}, self.root, limit), 10)
         pages = [json.loads(path.read_bytes()) for path in self.root.rglob('*.json')]
         self.assertTrue(all(set(page['names']) == {name} for page in pages))
         self.assertTrue(all(path.stat().st_size <= limit for path in self.root.rglob('*.json')))
-        self.assertCountEqual([key for page in pages for key in page['names'][name]], keys)
+        self.assertCountEqual([key for page in pages for key in page['names'][name]['keys']], keys)
 
     def test_single_name_or_key_cannot_overflow(self):
         for names in ({'n' * 500: ['k']}, {'n': ['k' * 500]}, {'n' * 500: []}):
@@ -144,8 +144,8 @@ class BoundedJsonTests(unittest.TestCase):
 
     def test_names_exact_boundary_one_byte_too_small(self):
         names = {'中文😀': ['key😀']}
-        metadata = {'hashAlgorithm': HASH_ALGORITHM, 'bucketCount': BUCKET_COUNT}
-        limit = len(encode_json({**metadata, 'names': {'中文😀': ['key😀']}}))
+        metadata = {'bucketCount': 1}
+        limit = len(encode_json({**metadata, 'names': {'中文😀': {'keys': ['key😀']}}}))
         write_name_index(names, self.root, limit)
         self.read_records('names', limit)
         with self.assertRaises(ValueError):

@@ -4,8 +4,8 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from bounded_json import DEFAULT_MAX_BYTES, HARD_MAX_BYTES, validate_limit, write_array_pages, write_bounded
-from routing_hash import HASH_ALGORITHM, bucket_id
+from bounded_json import DEFAULT_MAX_BYTES, HARD_MAX_BYTES, encode_json, validate_limit, write_array_pages, write_bounded
+from routing_hash import HASH_ALGORITHM, bucket_id, choose_bucket_count
 
 ROUTE_FIELDS = ("outputItems", "outputFluids")
 
@@ -42,17 +42,6 @@ SUPPORTED_HANDLERS = {
     "gregtech/GTNEIDefaultHandler_fluidsolidifier": "流体固化器",
     "gregtech/GTNEIDefaultHandler_hammer": "锻造锤",
 }
-# 按各池数据量选取桶数；是否生成仍由来源文件数与输出形态决定。
-HANDLER_BUCKET_COUNTS = {
-    "minecraft/ShapedRecipeHandler_crafting": 64,
-    "minecraft/ShapelessRecipeHandler_crafting": 64,
-    "gregtech/GTNEIDefaultHandler_tic_bolt_molding": 32,
-    "gregtech/GTNEIDefaultHandler_tic_part_extruding": 16,
-    "gregtech/GTNEIDefaultHandler_assembler": 16,
-    "gregtech/GTNEIDefaultHandler_alloy_smelter_recycling": 16,
-    "gregtech/GTNEIDefaultHandler_fluidsolidifier": 64,
-    "gregtech/GTNEIDefaultHandler_hammer": 16,
-}
 HAMMER = "gregtech/GTNEIDefaultHandler_hammer"
 
 
@@ -65,8 +54,7 @@ def build_recipe_buckets(version_dir, max_bytes=DEFAULT_MAX_BYTES):
     version_dir = Path(version_dir)
     source = version_dir / "Recipes"
     output = source
-    # 已分桶输入没有根顺序分页，直接重复运行应明确拒绝，不能误当空池清除原数据。
-    # 重新生成应从 split_all 的原始来源处理开始，由其先刷新各机器的顺序分页。
+    # 输入为 split_all 生成的顺序分页；重跑从原始来源重新生成这些页面。
     for handler in SUPPORTED_HANDLERS:
         directory = source / handler
         for child in directory.iterdir() if directory.is_dir() else ():
@@ -78,7 +66,6 @@ def build_recipe_buckets(version_dir, max_bytes=DEFAULT_MAX_BYTES):
     replaced_files = []
     total = written_recipes = shared = 0
     for handler, name in SUPPORTED_HANDLERS.items():
-        bucket_count = HANDLER_BUCKET_COUNTS[handler]
         files = sorted((path for path in (source / handler).glob("[0-9]*.json")
                         if path.stem.isdecimal()), key=lambda path: int(path.stem))
         if len(files) <= 1:
@@ -94,7 +81,7 @@ def build_recipe_buckets(version_dir, max_bytes=DEFAULT_MAX_BYTES):
                 # 不扩展到辅助字段或其他多输出结构；形态变化时整池退回原文件。
                 if recipe.get("otherItems") or not slots:
                     invalid = True
-                if slots == 1 and recipe_route(recipe, bucket_count) is None:
+                if slots == 1 and recipe_route(recipe, 1) is None:
                     invalid = True
                 if slots != 1 and handler != HAMMER:
                     invalid = True
@@ -102,6 +89,9 @@ def build_recipe_buckets(version_dir, max_bytes=DEFAULT_MAX_BYTES):
         if invalid:
             skipped[handler] = "输出形态或非唯一 rawKey 超出本次范围，保留原文件"
             continue
+        # shared 多产物配方独立分页；数字桶按可定位产物的记录量选择。
+        bucket_count = choose_bucket_count(sum(len(encode_json(recipe)) + 1 for recipe in entries
+                                              if output_slots(recipe) == 1), max_bytes)
         grouped = defaultdict(list)
         for recipe in entries:
             route = "shared" if output_slots(recipe) > 1 else recipe_route(recipe, bucket_count)

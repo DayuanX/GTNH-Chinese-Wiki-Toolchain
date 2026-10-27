@@ -219,29 +219,42 @@ python item_names.py generate-preferred --items-dir <预处理的Items目录> \
 
 ### 中文名称查询索引
 
-`split_all.py items` 同时生成 `ItemNames/<桶号>/<分块号>.json`，结构为：
+`split_all.py` 处理 `items`、`oredict` 或 `recipes` 后，依据最终物品、矿辞和配方刷新
+`ItemNames/<桶号>/<分块号>.json`。名称按本模组、本版本的索引字节量选择桶数，页内保留实际 `bucketCount`。
+以下为结构示例：
 
 ```json
-{"hashAlgorithm":"sha256-xor128-base62-15","bucketCount":64,"names":{"示例物品":["example:item:3","another:item"]}}
+{
+  "bucketCount": 64,
+  "names": {
+    "示例容器": {
+      "keys": ["example:container", "example:container_nbt"],
+      "rawKeys": ["example:container"],
+      "sourceHandlers": ["example/FillingHandler"],
+      "usageHandlers": ["example/EmptyingHandler"]
+    }
+  }
+}
 ```
 
-`names[中文名]` 的数组使用物品预处理结束后的最终 `key`，包含仍然需要的 NBT 哈希后缀。
-索引保留同名的全部候选，中文图片重定向单独应用人工选择。
-名称页同时提供两类轻量身份，取自同版本的预处理 Items：
+`names[中文名]` 收纳该名称的全部查询信息：
 
-- `rawKeys`：`{"完整key":"rawKey"}`，保存注册名和 damage，用于配方分桶路由。只记录 `rawKey` 与完整 key 不同的候选，其余候选直接使用完整 key。
-- `queryKeys`：`{"完整key":"语义queryKey"}`，保存物品已有的非空语义身份，例如蜜蜂物种。
+- `keys`：最终完整 key 数组，保留同名候选和 NBT 变体。
+- `rawKeys`：去重的基础身份数组，包含注册名和 damage，用于配方输出分桶及单产物查询的变体合并。与 `keys` 相同时省略。
+- `queryKeys`：可选的 `{"完整key":"语义queryKey"}` 映射，例如蜜蜂物种身份。
+- `sourceHandlers`：能获得该名称物品的处理器列表。
+- `usageHandlers`：能使用该名称物品的处理器列表。
 
-这两个对象只包含本页 `names` 引用的 key；同一 key 出现在多个分页时，各页均携带其身份映射。
-空对象省略。完整 key 用于读取名称、图片和 NBT；名称索引只携带查询所需的身份字段。
-分页大小计入名称、身份映射及元数据的最终 UTF-8 字节数，每页严格不超过 2,000,000 字节。
-每页 `names` 是对象，可直接用 `names[中文名]` 取得完整 key 数组。同一名称的超大数组可以跨页，
-每页同名只出现一次；查询时合并所有分页中该名称的数组并去重。
-普通名称可在 MongoDB projection 中指定 `names.铁锭`，但必须通过 `find` 获取该桶的全部匹配分页，
-以合并跨页候选。包含点或 `$` 的名称需要按字面键读取；
-可在服务器支持时使用聚合的 `$getField` 配合 `$literal`，或先读取桶页再用 Lua `names[名称]` 索引。
-使用聚合前，请确认服务端支持这些操作符。
-索引用于精确名称查询；模糊搜索需要扫描相应范围的数据。
+handler 使用 `Recipes` 下的完整 `mod/handler` 路径。同名候选的路径取并集，包含矿辞和语义身份对应的配方。
+来源列表同时收集基础身份的产物，供单产物名称查询合并 NBT 变体。
+`otherItems` 同时计入来源和用途；专用掉落集合计入来源，`keyItem` 计入用途。空列表省略。
+图片的首选候选由图片配置单独决定。
+
+同一名称可以跨页，各页数组和 `queryKeys` 映射合并后再使用；若合并后的记录没有 `rawKeys`，则采用 `keys`。
+默认每页最多 1,800,000 字节，最终检查计入所有字段和标点的 UTF-8 字节数，硬上限为 2,000,000 字节。
+Lua 查询一次读取命中名称桶的所有分页，使用 `$objectToArray` 按名称字面值筛选，支持名称中的点号和 `$`。
+精确名称转换同时取得 handler；多个输入的用途列表与多个输出的来源列表按版本取交集，填写 `type` 时再与指定处理器范围相交。
+另查 Fluids 得到的候选、模糊名称和 `@key` 使用各自的查询条件。各版本使用覆盖身份和矿辞候选并集的名称参与 handler 交集。
 
 ### 物品 key 分桶
 
@@ -268,16 +281,9 @@ python split_all.py items recipes --recipe-buckets
 其余七个 handler 若出现多输出、`otherItems` 或无可识别输出，整池保留原文件，诊断写入 manifest。
 每条配方写入一个桶。同槽候选的完整 key 可以不同，只要其 `rawKey` 相同即可归同桶；
 存在多个路由身份或没有可识别身份时，整池保留顺序分页。
-记录保留原 `index`；按 `(handler, index)` 识别记录，按 index 的数字页号、行号排序。
+记录保留原 `index`，配方身份由 `(handler, index)` 确定。
 `Recipes/routing-manifest.json` 的 `writtenRecipes` 记录实际写入条数，并列出处理的 handler、原文件、分桶文件和共享文件，便于读取端定位。读取配方时遍历清单指向的数据文件。
-各 handler 的逻辑桶数如下；少于两个来源文件或输出形态不符时保留顺序分页。
-
-| 配方池 | 桶数 |
-| --- | ---: |
-| 有序合成 | 64 |
-| 匠魂弩箭固化 | 32 |
-| 匠魂部件压模、组装机、合金炉回收、锻造锤 | 16 |
-| 无序合成、流体固化器 | 64 |
+各 handler 按当前模组、当前版本的实际数据量选择桶数。小附属的组装机与 GTNH 的组装机可以采用不同桶数；少于两个来源文件时保留顺序分页。
 
 每个配方页的 `routing.bucketCount` 和清单的 `handlers[handler].bucketCount` 标明该池桶数。
 `routing.identityFields` 为 `["rawKey", "key"]`，表示按此顺序取首个非空字段作为路由身份。
@@ -286,16 +292,19 @@ python split_all.py items recipes --recipe-buckets
 重新生成分桶时，从原始 dumps 运行 `split_all.py`。分桶器接受顺序分页的配方文件。
 
 查询端读取目标桶后，按原有条件匹配、排序和分页；未指定产物时需遍历该配方池的全部数据文件。
+当前 Lua 先按数据页路径取候选，再对候选排序。重新分桶会改变文件路径，因此默认首条和分页顺序可能变化；完整匹配结果保留。
+
+处理物品、矿辞或配方后，`source_state/<本地模组>/<版本>/version-config.lua` 从最终页面读取实际桶数，生成可发布到 `模块:Database/Versions/<远端模组>/<版本>` 的配置。数据页和此版本配置一同更新，并在 `模块:Database/Versions` 的 `versionModules` 中登记该模块。
 
 ### 分块哈希约定
 
 名称索引以中文名为输入，物品分桶以完整 `key` 为输入，配方分桶以产物 `rawKey`（缺省时为 `key`）为输入。
-三者共用 `routing_hash.bucket_id(text, bucket_count=64)`；物品显式传入 `ITEM_BUCKET_COUNT=128`，名称使用默认 64，配方显式传入对应 handler 的桶数。JSON/TABX 页的 `bucketCount` 标明实际桶数，哈希算法不变：
+三者共用 `routing_hash.bucket_id(text, bucket_count)`，调用时传入当前数据集或 handler 的实际桶数。JSON/TABX 页的 `bucketCount` 标明实际桶数，哈希算法不变：
 
 1. 对输入的 UTF-8 字节计算 SHA-256。
 2. 前后各 16 字节逐字节异或。
 3. 按 Dumper 的 `0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ` 字符表，保留低 15 位 Base62，左侧补零。
-4. 名称将该 15 位值对 64 取模，配方按 handler 的桶数取模；物品对 128 取模。桶号至少两位，例如 `00`、`63`、`100`、`127`。
+4. 将该 15 位值对当前配置的桶数取模。桶号至少两位，例如 `00`、`63`、`100`、`127`。
 
 前三步与当前 Dumper 的 NBT 后缀算法一致，测试包含现有 `{}` → `gLuB0gegBqh1aRe` 向量。
 对于 16、32、64 或 128 桶，桶号也等于
@@ -323,11 +332,12 @@ python data_upload.py
 
 ### 分桶文件大小限制
 
-`Items` 使用 128 个逻辑桶（JSON 和 TABX 一致），`ItemNames` 使用 64 个逻辑桶，`Recipes` 使用各 handler 配置的桶数；每桶按需生成多个数字分页。
+`Items`、`ItemNames` 和每个已适配配方池分别统计紧凑 JSON 的 UTF-8 数据字节数，按目标大小向上取整，再取不小于该值的最小 2 的幂作为桶数：1、2、4、8……。例如目标为 1,800,000 字节时，10 万字节用 1 桶，500 万字节用 4 桶。TABX 按最终行数据统计；配方的 shared 记录独立分页。
+桶数控制平均数据量；哈希分布不均、页头和单条记录大小由桶内分页处理。每个桶的所有数字分页都参与查询。
 默认分页上限为 **1,800,000 字节**；可调参数 `max_bytes` 必须为正整数且不得超过硬上限
 **2,000,000 字节**（十进制 2 MB）。所有页面按最终紧凑 JSON 的 UTF-8 字节数分页，
 计入中文、emoji、metadata、括号和逗号；写入前再次检查完整字节长度。
-记录只序列化一次后累计长度，不随每条新增记录反复序列化整批。
+选择桶数时累计各条记录的编码长度；分页时逐条编码和累计，避免反复序列化整批。
 
 名称索引的 `names[名称]` 长数组可跨文件分页，读取端应合并各页同名数组。
 单条物品、配方、名称或 key 超出一页容量时，生成停止并报告错误。

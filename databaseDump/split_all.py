@@ -20,10 +20,10 @@ from collections import Counter, defaultdict
 from itertools import chain
 from pathlib import Path
 from data_version import addon_mods, local_mod_name, source_directory, version_tag
-from item_names import build_artifacts, image_name_config, read_items
+from item_names import build_artifacts, image_name_config, read_items, write_item_name_index
 from nbt_identity import nbt_identity
 from bounded_json import HARD_MAX_BYTES, DEFAULT_MAX_BYTES, array_pages, encode_json, write_bounded
-from routing_hash import HASH_ALGORITHM, ITEM_BUCKET_COUNT, bucket_id
+from routing_hash import HASH_ALGORITHM, bucket_id, choose_bucket_count
 
 # Ensure real-time progress output
 sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, 'reconfigure') else None
@@ -873,14 +873,16 @@ def do_items_tabx(debug: bool):
 def write_item_tables(items):
     """按最终 key 输出 TABX 桶；成功后移除旧格式与不再使用的数字分页。"""
     fields = _scan_schema(items)
+    rows = [_tabx_row(item, fields) for item in items]
+    bucket_count = choose_bucket_count(sum(len(encode_json(row)) + 1 for row in rows), DEFAULT_MAX_BYTES)
     metadata = {"sources": f"从{VERSION_TAG}导出", "schema": {"fields": fields},
-                "hashAlgorithm": HASH_ALGORITHM, "bucketCount": ITEM_BUCKET_COUNT}
+                "hashAlgorithm": HASH_ALGORITHM, "bucketCount": bucket_count}
     groups = defaultdict(list)
-    for item in items:
+    for item, row in zip(items, rows):
         key = item.get("key")
         if not isinstance(key, str) or not key:
             raise ValueError("物品分桶要求每条记录具有最终 key")
-        groups[bucket_id(key, ITEM_BUCKET_COUNT)].append(_tabx_row(item, fields))
+        groups[bucket_id(key, bucket_count)].append(row)
     output = Path(VERSION) / "Items"
     written = set()
     for bucket, rows in sorted(groups.items()):
@@ -1925,6 +1927,16 @@ def main():
         from recipe_buckets import build_recipe_buckets
         report = build_recipe_buckets(VERSION)
         Path(AUX_DIR, "recipe-buckets.json").write_text(json.dumps(report, indent=2), "utf-8")
+    if {"items", "oredict", "recipes"}.intersection(tasks_to_run):
+        count = write_item_name_index(read_items(Path(VERSION) / "Items"), VERSION)
+        resolution_path = Path(AUX_DIR) / "image-name-resolution.json"
+        if resolution_path.exists():
+            resolution = json.loads(resolution_path.read_bytes())
+            resolution["indexFileCount"] = count
+            resolution_path.write_text(json.dumps(resolution, ensure_ascii=False, indent=2), "utf-8")
+        print(f"  [Item names] refreshed {count} pages from final items, ores and recipes")
+        from storage_config import write_version_config
+        write_version_config(VERSION, Path(AUX_DIR) / "version-config.lua")
     print("All done!")
 
 

@@ -11,8 +11,8 @@ from image_state import init_db, pending_redirects, update_state
 from item_names import build_artifacts, collect_names, default_image_candidate, generate_config, generate_preferred_config, load_choices, resolve_images, write_name_index
 from image_version import redirect_map
 from item_buckets import write_item_buckets
-from recipe_buckets import build_recipe_buckets, recipe_route, HANDLER_BUCKET_COUNTS
-from routing_hash import ITEM_BUCKET_COUNT, bucket_id, short_hash
+from recipe_buckets import build_recipe_buckets, recipe_route, SUPPORTED_HANDLERS
+from routing_hash import bucket_id, short_hash
 
 
 class NameRoutingTests(unittest.TestCase):
@@ -71,7 +71,7 @@ class NameRoutingTests(unittest.TestCase):
             actual = []
             for path in root.rglob('*.json'):
                 rows = json.loads(path.read_text('utf-8'))['items']
-                self.assertTrue(all(bucket_id(row['key'], ITEM_BUCKET_COUNT) == path.parent.name for row in rows))
+                self.assertTrue(all(bucket_id(row['key'], json.loads(path.read_bytes())['bucketCount']) == path.parent.name for row in rows))
                 actual.extend(rows)
             self.assertCountEqual(items, actual)
             write_item_buckets([], root)
@@ -94,115 +94,120 @@ class NameRoutingTests(unittest.TestCase):
             found = []
             for path in root.rglob('*.json'):
                 self.assertLessEqual(path.stat().st_size, 2048)
-                self.assertEqual(bucket_id("重名"), path.parent.name)
-                found.extend(json.loads(path.read_text('utf-8'))['names']['重名'])
+                self.assertEqual(bucket_id("重名", json.loads(path.read_bytes())["bucketCount"]), path.parent.name)
+                found.extend(json.loads(path.read_text('utf-8'))['names']['重名']['keys'])
             self.assertEqual(keys, sorted(found))
             write_name_index({"重名": keys[:1]}, root, max_bytes=2048)
             self.assertEqual(1, len(list(root.rglob('*.json'))))
 
-    def test_semantic_keys_follow_each_name_page(self):
+    def test_name_records_merge_all_fields_across_pages(self):
         keys = [f"Forestry:beePrincessGE_variant{i:03d}" for i in range(30)]
-        semantics = {key: "bee:PRINCESS:forestry.speciesForest" for key in keys}
-        semantics["unused:item"] = "unused:identity"
-        name = "森林公主蜂"
-        alias = next(f"森林公主蜂{i}" for i in range(1000) if bucket_id(f"森林公主蜂{i}") == bucket_id(name))
-        names = {name: keys, alias: keys[:2]}
+        name = "$森林.公主蜂"
+        semantic = {key: "bee:PRINCESS:forestry.speciesForest" for key in keys}
+        raw = "Forestry:beePrincessGE"
+        handlers = {"sourceHandlers": {name: ["forestry/bees", "minecraft/crafting"]},
+                    "usageHandlers": {name: ["forestry/breeding"]}}
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            self.assertGreater(write_name_index(names, root, 600, query_keys=semantics), 1)
-            restored = {name: [], alias: []}
-            for path in sorted(root.rglob('*.json'), key=lambda path: int(path.stem)):
-                self.assertLessEqual(path.stat().st_size, 600)
-                page = json.loads(path.read_text('utf8'))
-                page_keys = {key for values in page['names'].values() for key in values}
-                self.assertEqual(page['queryKeys'], {key: semantics[key] for key in page_keys})
-                for text, values in page['names'].items():
-                    restored[text].extend(values)
-            self.assertEqual(restored, names)
+            self.assertGreater(write_name_index({name: keys}, root, 220, query_keys=semantic,
+                               raw_keys={key: raw for key in keys}, handlers=handlers), 1)
+            merged = {"keys": [], "rawKeys": [], "queryKeys": {}, "sourceHandlers": [], "usageHandlers": []}
+            for path in sorted(root.rglob('*.json'), key=lambda p: int(p.stem)):
+                self.assertLessEqual(path.stat().st_size, 220)
+                page = json.loads(path.read_bytes())
+                self.assertEqual(set(page), {'bucketCount', 'names'})
+                for field, value in page['names'][name].items():
+                    if field == 'queryKeys':
+                        merged[field].update(value)
+                    else:
+                        merged[field].extend(value)
+            self.assertEqual(merged, {'keys': keys, 'rawKeys': [raw], 'queryKeys': semantic,
+                                     **{field: values[name] for field, values in handlers.items()}})
 
-    def test_build_artifacts_copies_query_identities_into_names(self):
+    def test_build_artifacts_groups_query_identities_under_name(self):
         item = {'key': 'Forestry:beePrincessGE_variant', 'translatedName': '森林公主蜂',
-                'rawKey': 'Forestry:beePrincessGE',
-                'queryKey': 'bee:PRINCESS:forestry.speciesForest', 'nbt': '{Genome:{...}}',
-                'tooltips': '完整物品说明'}
+                'rawKey': 'Forestry:beePrincessGE', 'queryKey': 'bee:PRINCESS:forest',
+                'nbt': '{Genome:{...}}', 'tooltips': '完整物品说明'}
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             build_artifacts([item], root / 'version', root / 'state', root,
                             root / 'choices.json', write_items=False)
             page = json.loads(next((root / 'version/ItemNames').rglob('*.json')).read_bytes())
-            self.assertEqual(page['names'], {'森林公主蜂': [item['key']]})
-            self.assertEqual(page['queryKeys'], {item['key']: item['queryKey']})
-            self.assertEqual(page['rawKeys'], {item['key']: item['rawKey']})
-            self.assertEqual(set(page), {'hashAlgorithm', 'bucketCount', 'names', 'queryKeys', 'rawKeys'})
+            self.assertEqual(page, {'bucketCount': 1, 'names': {'森林公主蜂': {
+                'keys': [item['key']], 'rawKeys': [item['rawKey']],
+                'queryKeys': {item['key']: item['queryKey']}}}})
 
-    def test_raw_and_semantic_keys_follow_referenced_candidates_across_pages(self):
-        from bounded_json import encode_json
-        from routing_hash import HASH_ALGORITHM, BUCKET_COUNT
-        key = 'gregtech:gt.metatool.01:196_nbt'
-        raw = 'gregtech:gt.metatool.01:196'
-        semantic = 'example:identity'
-        name = '剪线钳 LV'
-        alias = next(f'剪线钳{i}' for i in range(1000) if bucket_id(f'剪线钳{i}') == bucket_id(name))
-        names = {name: [key], alias: [key]}
-        metadata = {'hashAlgorithm': HASH_ALGORITHM, 'bucketCount': BUCKET_COUNT}
-        page = {**metadata, 'names': {name: [key]},
-                'rawKeys': {key: raw}, 'queryKeys': {key: semantic}}
-        exact = len(encode_json(page))
+    def test_plain_item_omits_redundant_raw_and_empty_fields(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            count = write_name_index(names, root, exact,
-                                     raw_keys={key: raw, 'unused': 'unused:raw'},
-                                     query_keys={key: semantic, 'unused': 'unused:semantic'})
-            self.assertEqual(count, 2)
-            for path in root.rglob('*.json'):
-                self.assertLessEqual(path.stat().st_size, exact)
-                actual = json.loads(path.read_bytes())
-                self.assertEqual(actual['rawKeys'], {key: raw})
-                self.assertEqual(actual['queryKeys'], {key: semantic})
-            self.assertEqual((root / bucket_id(name) / '0.json').stat().st_size, exact)
-            with self.assertRaisesRegex(ValueError, '单条名称'):
-                write_name_index({name: [key]}, root, exact - 1,
-                                 raw_keys={key: raw}, query_keys={key: semantic})
+            write_name_index({'石头': ['minecraft:stone']}, root,
+                             raw_keys={'minecraft:stone': 'minecraft:stone'},
+                             query_keys={'minecraft:stone': '', 'unused': 'identity'})
+            page = json.loads(next(root.rglob('*.json')).read_bytes())
+            self.assertEqual(page, {'bucketCount': 1, 'names': {'石头': {'keys': ['minecraft:stone']}}})
 
-    def test_plain_item_omits_redundant_raw_identity(self):
-        items = [{'key': 'minecraft:stone', 'rawKey': 'minecraft:stone', 'translatedName': '石头'}]
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            build_artifacts(items, root / 'version', root / 'state', root,
-                            root / 'choices.json', write_items=False)
-            page = json.loads(next((root / 'version/ItemNames').rglob('*.json')).read_bytes())
-            self.assertNotIn('rawKeys', page)
-
-    def test_no_semantic_keys_keep_existing_serialization(self):
-        from bounded_json import map_array_pages
-        from routing_hash import HASH_ALGORITHM, BUCKET_COUNT
-        metadata = {"hashAlgorithm": HASH_ALGORITHM, "bucketCount": BUCKET_COUNT}
-        names = {"泥球": ["BiomesOPlenty:mudball", "BiomesOPlenty:mudball:1"]}
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            write_name_index(names, root, query_keys={})
-            self.assertEqual(next(root.rglob('*.json')).read_bytes(),
-                             next(map_array_pages(names, metadata, 'names')))
-            write_name_index(names, root, query_keys={names['泥球'][0]: '', 'unused': 'identity'})
-            self.assertNotIn('queryKeys', json.loads(next(root.rglob('*.json')).read_bytes()))
-
-    def test_semantic_index_exact_byte_limit_and_oversized_pair(self):
+    def test_index_exact_byte_limit_and_oversized_field(self):
         from bounded_json import encode_json, HARD_MAX_BYTES
-        from routing_hash import HASH_ALGORITHM, BUCKET_COUNT
-        key = "Forestry:beePrincessGE_variant"
-        names = {"森林公主蜂": [key]}
-        semantic = "bee:PRINCESS:forestry.speciesForest"
-        page = {"hashAlgorithm": HASH_ALGORITHM, "bucketCount": BUCKET_COUNT,
-                "names": names, "queryKeys": {key: semantic}}
+        key, name, semantic = 'Forestry:beePrincessGE_variant', '森林公主蜂', 'bee:PRINCESS:forest'
+        page = {'bucketCount': 1, 'names': {name: {'keys': [key], 'queryKeys': {key: semantic}}}}
         exact = len(encode_json(page))
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            write_name_index(names, root, exact, query_keys={key: semantic})
+            self.assertEqual(write_name_index({name: [key]}, root, exact, query_keys={key: semantic}), 1)
             self.assertEqual(next(root.rglob('*.json')).stat().st_size, exact)
+            self.assertEqual(write_name_index({name: [key]}, root, exact - 1, query_keys={key: semantic}), 2)
             with self.assertRaisesRegex(ValueError, '单条名称'):
-                write_name_index(names, root, exact - 1, query_keys={key: semantic})
-            with self.assertRaisesRegex(ValueError, '单条名称'):
-                write_name_index(names, root, HARD_MAX_BYTES, query_keys={key: '中' * 700000})
+                write_name_index({name: [key]}, root, HARD_MAX_BYTES, query_keys={key: '中' * 700000})
+
+    def test_handlers_include_ores_semantics_raw_outputs_and_other_items(self):
+        from name_recipes import collect_handlers
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixtures = {
+                'OreDictionary/0.json': {'oreA': ['mod:a'], 'oreWildcard': ['mod:block:32767']},
+                'Recipes/mod/craft.json': {'recipes': [
+                    {'inputItems': [['#oreA']], 'outputItems': [{'key': 'mod:variant', 'rawKey': 'mod:base'}]},
+                    {'inputItems': ['semantic:a'], 'otherItems': ['mod:other']},
+                    {'inputItems': ['#oreWildcard']},
+                ]},
+                'Recipes/mod/second/00/0.json': {'recipes': [{'outputItems': ['mod:a']}]},
+                'Recipes/routing-manifest.json': {'handlers': {}},
+            }
+            for relative, content in fixtures.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(content), 'utf-8')
+            result = collect_handlers({'甲': ['mod:a'], '乙': ['mod:known'], '丙': ['mod:other'],
+                                       '方块': ['mod:block:2']},
+                                      {'mod:known': 'mod:base'}, {'mod:a': 'semantic:a'}, root)
+            self.assertEqual(result['sourceHandlers'], {'甲': ['mod/second'], '乙': ['mod/craft'], '丙': ['mod/craft']})
+            self.assertEqual(result['usageHandlers'], {'甲': ['mod/craft'], '丙': ['mod/craft'], '方块': ['mod/craft']})
+
+    def test_recipe_task_refreshes_name_handlers_after_writing_recipes(self):
+        import split_all
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_item_buckets([{'key': 'mod:item', 'translatedName': '物品'}], root / 'Items')
+            write_name_index({'物品': ['mod:item']}, root / 'ItemNames')
+            state = root / 'state'
+            state.mkdir()
+            (state / 'image-name-resolution.json').write_text('{"indexFileCount":99}', 'utf8')
+
+            def write_recipes(debug):
+                path = root / 'Recipes/mod/crafting/0.json'
+                path.parent.mkdir(parents=True)
+                path.write_text('{"recipes":[{"outputItems":["mod:item"]}]}', 'utf-8')
+
+            with patch.object(split_all, 'VERSION', str(root)), \
+                 patch.object(split_all, 'AUX_DIR', str(state)), \
+                 patch.object(split_all, 'configure_source'), \
+                 patch.dict(split_all.TASKS, {'recipes': ('Recipes', write_recipes)}), \
+                 patch('sys.argv', ['split_all.py', 'recipes']):
+                split_all.main()
+            record = json.loads(next((root / 'ItemNames').rglob('*.json')).read_bytes())['names']['物品']
+            self.assertEqual(record['sourceHandlers'], ['mod/crafting'])
+            self.assertEqual(json.loads((state / 'image-name-resolution.json').read_bytes())['indexFileCount'], 1)
+            self.assertIn('itemNameBuckets = 1', (state / 'version-config.lua').read_text('utf8'))
 
     def test_existing_nbt_hash_and_unicode_bucket(self):
         self.assertEqual("gLuB0gegBqh1aRe", short_hash("{}"))
@@ -212,7 +217,7 @@ class NameRoutingTests(unittest.TestCase):
         import hashlib
         for name in ("铁锭", "minecraft:stone", "A_B", "带有 NBT 的物品🧪"):
             digest = hashlib.sha256(name.encode("utf-8")).digest()
-            self.assertEqual((digest[15] ^ digest[31]) % 64, int(bucket_id(name)))
+            self.assertEqual((digest[15] ^ digest[31]) % 64, int(bucket_id(name, 64)))
 
     def test_choices_do_not_discard_name_candidates(self):
         items = [{"key": "a:one", "translatedName": "铁锭", "iconName": "icon_a.png"},
@@ -374,13 +379,13 @@ class NameRoutingTests(unittest.TestCase):
             config = root / "choices.json"
             items = [{"key": "example:item_hash", "translatedName": "名称", "iconName": "icon_test.png"}]
             report = build_artifacts(items, root / "version", root / "state", source, config)
-            item_page = root / "version/Items" / bucket_id("example:item_hash", ITEM_BUCKET_COUNT) / "0.json"
+            item_page = root / "version/Items" / bucket_id("example:item_hash", 1) / "0.json"
             self.assertEqual(json.loads(item_page.read_bytes())["items"], items)
             self.assertEqual(report["itemFileCount"], 1)
             self.assertFalse((root / "version/ItemBuckets").exists())
             self.assertFalse(config.exists(), "普通预处理不得自动生成或覆盖人工配置")
-            index = root / "version/ItemNames" / bucket_id("名称") / "0.json"
-            self.assertEqual({"名称": ["example:item_hash"]}, json.loads(index.read_text("utf-8"))["names"])
+            index = root / "version/ItemNames" / bucket_id("名称", 1) / "0.json"
+            self.assertEqual({"名称": {"keys": ["example:item_hash"]}}, json.loads(index.read_text("utf-8"))["names"])
             with patch.dict(os.environ, {"DUMPS_DIR": str(source), "MOD_LOCAL_NAME": "GTNH", "IMAGE_NAME_CONFIG": str(config)}):
                 self.assertEqual({"File:名称.png": "icon_test.png"}, redirect_map(str(root / "state/image_redirect.resolved.csv")))
                 config.write_text('{"schemaVersion":2,"choices":{}}', "utf-8")
@@ -436,8 +441,8 @@ class NameRoutingTests(unittest.TestCase):
                   "outputItems": [[{"key": "exact_hash1", "rawKey": "example:item:3", "nbt": "{state:1}"},
                                    {"key": "exact_hash2", "rawKey": "example:item:3", "queryKey": "bee:species"}]],
                   "otherItems": []}
-        self.assertEqual(bucket_id("example:item:3"), recipe_route(recipe, 64))
-        self.assertEqual(bucket_id("fluid.water"), recipe_route({"outputFluids": [{"key": "fluid.water"}]}, 64))
+        self.assertEqual(bucket_id("example:item:3", 64), recipe_route(recipe, 64))
+        self.assertEqual(bucket_id("fluid.water", 64), recipe_route({"outputFluids": [{"key": "fluid.water"}]}, 64))
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "Recipes/gregtech/GTNEIDefaultHandler_assembler/0.json"
@@ -449,7 +454,7 @@ class NameRoutingTests(unittest.TestCase):
             self.assertEqual(2, report["writtenRecipes"])
             paths = list(source.parent.rglob("*.json"))
             self.assertEqual(len(paths), 1)
-            self.assertEqual(paths[0].parent.name, bucket_id("example:item:3", 16))
+            self.assertEqual(paths[0].parent.name, bucket_id("example:item:3", 1))
             data = json.loads(paths[0].read_bytes())
             self.assertEqual(data["recipes"], [recipe, second])
             self.assertEqual(data["routing"]["identityFields"], ["rawKey", "key"])
@@ -464,7 +469,7 @@ class NameRoutingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             originals = {}
-            for handler, count in HANDLER_BUCKET_COUNTS.items():
+            for handler, count in SUPPORTED_HANDLERS.items():
                 recipes = [{"index": f"0/{i}", "outputItems": [{"key": f"mod:item:{i}", "nbt": "{中文:1}"}]} for i in range(80)]
                 originals[handler] = recipes
                 source = root / "Recipes" / handler
@@ -473,7 +478,7 @@ class NameRoutingTests(unittest.TestCase):
                     (source / f"{page}.json").write_text(json.dumps({"recipes": recipes[page*40:(page+1)*40]}), "utf-8")
             report = build_recipe_buckets(root)
             self.assertNotIn("bucketCount", report)
-            self.assertEqual(report["recipeBuckets"], HANDLER_BUCKET_COUNTS)
+            self.assertEqual(report["recipeBuckets"], {handler: 1 for handler in SUPPORTED_HANDLERS})
             self.assertEqual(json.loads((root / "Recipes/routing-manifest.json").read_bytes()), report)
             for handler, count in report["recipeBuckets"].items():
                 self.assertEqual(report["handlers"][handler]["bucketCount"], count)
@@ -523,7 +528,7 @@ class NameRoutingTests(unittest.TestCase):
             report = build_recipe_buckets(root)
             self.assertEqual(["gregtech/GTNEIDefaultHandler_hammer"], list(report["handlers"]))
             self.assertEqual(2, report["sharedRecipes"])
-            self.assertEqual(report["recipeBuckets"], {"gregtech/GTNEIDefaultHandler_hammer": 16})
+            self.assertEqual(report["recipeBuckets"], {"gregtech/GTNEIDefaultHandler_hammer": 1})
             shared = root / "Recipes/gregtech/GTNEIDefaultHandler_hammer/shared/0.json"
             self.assertEqual(2, len(json.loads(shared.read_text("utf-8"))["recipes"]))
             self.assertTrue((root / "Recipes/gregtech/GTNEIDefaultHandler_macerator/0.json").exists())

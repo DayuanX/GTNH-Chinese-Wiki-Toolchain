@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from bounded_json import HARD_MAX_BYTES, encode_json
 from item_names import read_items
-from routing_hash import ITEM_BUCKET_COUNT, bucket_id
+from routing_hash import bucket_id
 import split_all
 
 
@@ -321,7 +321,7 @@ class SplitOutputTests(unittest.TestCase):
             self.assertFalse(list((self.version / "Items").rglob("*.tabx")))
             for path in (self.version / "Items").rglob("*.json"):
                 for row in json.loads(path.read_bytes())["items"]:
-                    self.assertEqual(path.parent.name, bucket_id(row["key"], ITEM_BUCKET_COUNT))
+                    self.assertEqual(path.parent.name, bucket_id(row["key"], json.loads(path.read_bytes())["bucketCount"]))
             self.assertFalse((self.version / "ItemBuckets").exists())
 
     def test_oversized_tabx_row_does_not_remove_previous_json(self):
@@ -333,15 +333,15 @@ class SplitOutputTests(unittest.TestCase):
         self.assertEqual(old.read_bytes(), original)
         self.assertFalse(list((self.version / "Items").rglob("*.tabx")))
 
-    def test_tabx_items_use_128_buckets_and_remove_three_digit_stale_pages(self):
+    def test_tabx_items_choose_one_bucket_and_remove_three_digit_stale_pages(self):
         key = next(f'mod:item{i}' for i in range(5000) if bucket_id(f'mod:item{i}', 128) == '100')
         stale = self.version / 'Items/127/0.tabx'
         stale.parent.mkdir()
         stale.write_bytes(b'{}')
         split_all.write_item_tables([{'key': key, 'translatedName': '测试'}])
-        page = self.version / 'Items/100/0.tabx'
+        page = self.version / 'Items/00/0.tabx'
         data = json.loads(page.read_bytes())
-        self.assertEqual(data['bucketCount'], 128)
+        self.assertEqual(data['bucketCount'], 1)
         self.assertEqual(data['hashAlgorithm'], 'sha256-xor128-base62-15')
         self.assertFalse(stale.exists())
         self.assertEqual(list(read_items(self.version / 'Items')), [{'key': key, 'translatedName': '测试'}])
