@@ -231,7 +231,10 @@ python item_names.py generate-preferred --items-dir <预处理的Items目录> \
       "keys": ["example:container", "example:container_nbt"],
       "rawKeys": ["example:container"],
       "sourceHandlers": ["example/FillingHandler"],
-      "usageHandlers": ["example/EmptyingHandler"]
+      "usageHandlers": [
+        "example/EmptyingHandler",
+        ["minecraft/ShapedRecipeHandler_crafting", [0, 3, 12]]
+      ]
     }
   }
 }
@@ -243,12 +246,20 @@ python item_names.py generate-preferred --items-dir <预处理的Items目录> \
 - `rawKeys`：去重的基础身份数组，包含注册名和 damage，用于配方输出分桶及单产物查询的变体合并。与 `keys` 相同时省略。
 - `queryKeys`：可选的 `{"完整key":"语义queryKey"}` 映射，例如蜜蜂物种身份。
 - `sourceHandlers`：能获得该名称物品的处理器列表。
-- `usageHandlers`：能使用该名称物品的处理器列表。
+- `usageHandlers`：用途条目列表；字符串表示整个处理器，`[handler, [编号...]]` 表示该输入名称涉及的桶号或普通文件号。
 
 handler 使用 `Recipes` 下的完整 `mod/handler` 路径。同名候选的路径取并集，包含矿辞和语义身份对应的配方。
 来源列表同时收集基础身份的产物，供单产物名称查询合并 NBT 变体。
 `otherItems` 同时计入来源和用途；专用掉落集合计入来源，`keyItem` 计入用途。空列表省略。
 图片的首选候选由图片配置单独决定。
+
+输入编号在配方最终拆分后生成，复用同一种二元数组结构。版本配置 `storage.recipeBuckets` 中的处理器将编号解释为桶号，其余处理器解释为普通文件号。
+分桶索引启用有序合成、匠魂弩箭固化、组装机、合金炉回收和锻造锤；桶号 0 对应目录 `00/`。
+普通文件索引启用伪装板合成、基因采样机、电弧炉回收、组装机、流体提取机回收、研磨机、研磨机回收、微光嬗变和包含要素的物品；文件号 0 对应 `0.json`。
+普通分页中，单文件处理器以及覆盖全部文件的名称保存字符串条目，其余保存所涉及的文件号。
+同名物品、矿辞和语义身份的编号取并集，多输入查询取交集；分桶时继续与输出定位的桶集合取交集。
+锻造锤的 `shared/` 页随数字桶一起读取；`[handler, []]` 表示该名称仅涉及 shared 配方。
+桶内全部分页参与查询；普通文件号交集为空时返回空结果。名称索引、最终配方文件和版本配置同步更新。
 
 同一名称可以跨页，各页数组和 `queryKeys` 映射合并后再使用；若合并后的记录没有 `rawKeys`，则采用 `keys`。
 默认每页最多 1,800,000 字节，最终检查计入所有字段和标点的 UTF-8 字节数，硬上限为 2,000,000 字节。

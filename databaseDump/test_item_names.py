@@ -106,7 +106,7 @@ class NameRoutingTests(unittest.TestCase):
         semantic = {key: "bee:PRINCESS:forestry.speciesForest" for key in keys}
         raw = "Forestry:beePrincessGE"
         handlers = {"sourceHandlers": {name: ["forestry/bees", "minecraft/crafting"]},
-                    "usageHandlers": {name: ["forestry/breeding"]}}
+                    "usageHandlers": {name: ["forestry/breeding", ["minecraft/crafting", [0, 3, 15]]]}}
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             self.assertGreater(write_name_index({name: keys}, root, 220, query_keys=semantic,
@@ -208,6 +208,77 @@ class NameRoutingTests(unittest.TestCase):
             self.assertEqual(record['sourceHandlers'], ['mod/crafting'])
             self.assertEqual(json.loads((state / 'image-name-resolution.json').read_bytes())['indexFileCount'], 1)
             self.assertIn('itemNameBuckets = 1', (state / 'version-config.lua').read_text('utf8'))
+
+    def test_input_bucket_entries_merge_ore_semantic_names_and_keep_shared(self):
+        from name_recipes import collect_handlers
+        shaped = 'minecraft/ShapedRecipeHandler_crafting'
+        hammer = 'gregtech/GTNEIDefaultHandler_hammer'
+        extruding = 'gregtech/GTNEIDefaultHandler_tic_part_extruding'
+        assembler = 'gregtech/GTNEIDefaultHandler_assembler'
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixtures = {
+                'OreDictionary/0.json': {'oreA': ['mod:a'], 'tool': ['mod:tool:32767']},
+                f'Recipes/{shaped}/00/0.json': {'routing': {'bucketCount': 16}, 'recipes': [
+                    {'inputItems': [['#oreA', '#tool']], 'outputItems': ['mod:a']}]},
+                f'Recipes/{shaped}/00/1.json': {'routing': {'bucketCount': 16}, 'recipes': [
+                    {'inputItems': [{'key': 'variant', 'queryKey': 'semantic:b'}]}]},
+                f'Recipes/{shaped}/03/0.json': {'routing': {'bucketCount': 16}, 'recipes': [
+                    {'inputItems': ['semantic:b']}]},
+                f'Recipes/{hammer}/shared/0.json': {'routing': {'bucketCount': 2}, 'recipes': [
+                    {'inputItems': ['mod:shared']}]},
+                f'Recipes/{extruding}/01/0.json': {'routing': {'bucketCount': 2}, 'recipes': [
+                    {'inputItems': ['mod:a']}]},
+                f'Recipes/{assembler}/0.json': {'recipes': [{'inputItems': ['mod:a']}]},
+            }
+            for relative, data in fixtures.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(data), 'utf8')
+            handlers = collect_handlers({'同名': ['mod:a', 'mod:b'], '工具': ['mod:tool:2'],
+                                         '副产物配方输入': ['mod:shared']}, {}, {'mod:b': 'semantic:b'}, root)
+            self.assertEqual(handlers['usageHandlers']['同名'],
+                             [assembler, extruding, [shaped, [0, 3]]])
+            self.assertEqual(handlers['usageHandlers']['工具'], [[shaped, [0]]])
+            self.assertEqual(handlers['usageHandlers']['副产物配方输入'], [[hammer, []]])
+            self.assertEqual(handlers['sourceHandlers']['同名'], [shaped])
+
+    def test_input_file_numbers_follow_final_pages_and_omit_full_coverage(self):
+        from name_recipes import collect_handlers
+        macerator = 'gregtech/GTNEIDefaultHandler_macerator'
+        assembler = 'gregtech/GTNEIDefaultHandler_assembler'
+        integration = 'BuildCraft_Silicon/RecipeHandlerIntegrationTable_null'
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixtures = {
+                'OreDictionary/0.json': {'oreA': ['mod:a'], 'tool': ['mod:tool:32767']},
+                f'Recipes/{macerator}/0.json': {'recipes': [
+                    {'inputItems': ['#oreA', '#tool', 'mod:common'], 'outputItems': ['mod:a']}]},
+                f'Recipes/{macerator}/3.json': {'recipes': [
+                    {'inputItems': ['mod:c', 'mod:common'], 'inputFluids': ['fluid:a'],
+                     'otherItems': ['mod:aux'], 'keyItem': 'mod:key'}]},
+                f'Recipes/{macerator}/12.json': {'recipes': [
+                    {'inputItems': [{'key': 'variant', 'queryKey': 'semantic:b'}, 'mod:common']}]},
+                f'Recipes/{assembler}/0.json': {'recipes': [{'inputItems': ['mod:a']}]},
+                f'Recipes/{integration}/0.json': {'recipes': [{'inputItems': ['mod:a']}]},
+                f'Recipes/{integration}/1.json': {'recipes': [{'inputItems': ['mod:c']}]},
+            }
+            for relative, data in fixtures.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(data), 'utf8')
+            names = {'同名': ['mod:a', 'mod:b'], '工具': ['mod:tool:2'], '其他': ['mod:c'],
+                     '全文件': ['mod:common'], '流体': ['fluid:a'], '辅助': ['mod:aux'], '关键': ['mod:key']}
+            result = collect_handlers(names, {}, {'mod:b': 'semantic:b'}, root)
+            self.assertEqual(result['usageHandlers']['同名'], [integration, assembler, [macerator, [0, 12]]])
+            self.assertEqual(result['usageHandlers']['全文件'], [macerator])
+            self.assertEqual(result['usageHandlers']['工具'], [[macerator, [0]]])
+            for name in ('流体', '辅助', '关键'):
+                self.assertEqual(result['usageHandlers'][name], [[macerator, [3]]])
+            self.assertEqual(result['sourceHandlers']['同名'], [macerator])
+            (root / f'Recipes/{macerator}/0.json').rename(root / f'Recipes/{macerator}/7.json')
+            refreshed = collect_handlers(names, {}, {'mod:b': 'semantic:b'}, root)
+            self.assertEqual(refreshed['usageHandlers']['同名'], [integration, assembler, [macerator, [7, 12]]])
 
     def test_existing_nbt_hash_and_unicode_bucket(self):
         self.assertEqual("gLuB0gegBqh1aRe", short_hash("{}"))

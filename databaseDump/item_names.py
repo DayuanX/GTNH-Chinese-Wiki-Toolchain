@@ -312,7 +312,7 @@ def write_name_index(names, output, max_bytes=DEFAULT_MAX_BYTES, *, query_keys=N
         for field in ("sourceHandlers", "usageHandlers"):
             paths = handlers.get(field, {}).get(name)
             if paths:
-                record[field] = sorted(set(paths))
+                record[field] = sorted(paths, key=lambda entry: entry[0] if isinstance(entry, list) else entry)
         records[name] = record
     bucket_count = choose_bucket_count(sum(len(encode_json({name: record})) - 1
                                           for name, record in records.items()), max_bytes)
