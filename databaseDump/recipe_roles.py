@@ -12,6 +12,7 @@ OUTPUT_IDENTIFIERS = {
     'EnderIOSagMill', 'EnderIOSoulBinder', 'thaumictinkerer.infusedseeds',
     'wgInfernalBlastfurnace', 'extratrees.lumbermill', 'bq_quest',
     'genetics.sequencer', 'kubatech.eec',
+    'forestry.centrifuge',  # 林业离心机的辅助物品全部归入产物，保持原槽位顺序。
     'harvestcraftAnimalTrapDrops', 'harvestcraftFishTrapDrops', 'harvestcraftGardenDrops',
 }
 OUTPUT_SOURCES = {

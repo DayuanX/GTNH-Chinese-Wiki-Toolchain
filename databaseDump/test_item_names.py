@@ -183,6 +183,31 @@ class NameRoutingTests(unittest.TestCase):
             self.assertEqual(result['sourceHandlers'], {'甲': ['mod/second'], '乙': ['mod/craft'], '丙': ['mod/craft']})
             self.assertEqual(result['usageHandlers'], {'甲': ['mod/craft'], '丙': ['mod/craft'], '方块': ['mod/craft']})
 
+    def test_forestry_centrifuge_products_are_sources_without_usage_handlers(self):
+        from name_recipes import collect_handlers
+        from recipe_roles import normalize_recipe_roles
+
+        comb = 'gregtech:gt.comb:49'
+        dust = 'gregtech:gt.metaitem.01:2849'
+        recipe = {'inputItems': [comb], 'outputItems': [], 'otherItems': [
+            'Forestry:beeswax', {'key': dust, 'chance': 5000, 'amount': 2},
+        ]}
+        normalize_recipe_roles(recipe, {'identifier': 'forestry.centrifuge'})
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            handler = 'Forestry/NEIHandlerCentrifuge_centrifuge'
+            path = root / 'Recipes' / handler / '0.json'
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({'recipes': [recipe]}), 'utf-8')
+            result = collect_handlers({'碎石蜂窝': [comb], '黑花岗岩粉': [dust]}, {}, {}, root)
+
+        self.assertEqual(result['sourceHandlers'], {'黑花岗岩粉': [handler]})
+        self.assertEqual(result['usageHandlers'], {'碎石蜂窝': [handler]})
+        self.assertEqual(recipe['outputItems'], [
+            'Forestry:beeswax', {'key': dust, 'chance': 5000, 'amount': 2},
+        ])
+
     def test_recipe_task_refreshes_name_handlers_after_writing_recipes(self):
         import split_all
         with tempfile.TemporaryDirectory() as temporary:
