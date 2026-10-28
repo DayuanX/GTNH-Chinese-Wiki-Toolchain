@@ -1720,6 +1720,36 @@ class _RecipeAssociations:
 
 
 
+def _remove_rebuilt_recipe_route(handler):
+    """成功改回顺序分页后，仅移除当前机器的路由，保留未重建机器的配置。"""
+    root = Path(VERSION) / "Recipes"
+    path = root / "routing-manifest.json"
+    if not path.exists():
+        return
+    report = json.loads(path.read_bytes())
+    handlers = report.get("handlers", {})
+    buckets = report.get("recipeBuckets", {})
+    if handler not in handlers and handler not in buckets:
+        return
+    handlers.pop(handler, None)
+    buckets.pop(handler, None)
+    if not handlers and not buckets:
+        path.unlink()
+        return
+    # 汇总只描述仍保持分桶的机器；shared 页的条数不能用文件数代替。
+    report["sourceRecipes"] = sum(details["sourceRecipes"] for details in handlers.values())
+    report["writtenRecipes"] = report["sourceRecipes"]
+    report["files"] = sum(len(files) for details in handlers.values()
+                          for files in details["routes"].values())
+    report["sharedRecipes"] = sum(
+        len(json.loads((root / relative).read_bytes())["recipes"])
+        for details in handlers.values() for relative in details["routes"].get("shared", [])
+    )
+    temporary = path.with_suffix(".json.tmp")
+    write_bounded(temporary, json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"), HARD_MAX_BYTES)
+    temporary.replace(path)
+
+
 def do_recipes(debug: bool):
     """Split recipes/**/*.json -> recipes/{mod}/{handler}/"""
     print("=" * 50)
@@ -1774,9 +1804,8 @@ def do_recipes(debug: bool):
         for recipe in recipes:
             normalize_recipe_roles(recipe, metadata)
             associations.associate(recipe, os.path.join(subdir, "0.json"))
-        # 清除旧桶页前使路由清单失效；普通 recipes 重跑不会重新生成分桶清单。
-        Path(VERSION, "Recipes", "routing-manifest.json").unlink(missing_ok=True)
         page_count, total = _write_recipe_pages(recipes, metadata, output_dir)
+        _remove_rebuilt_recipe_route(Path(subdir).as_posix())
         print(f"    Done: {total:,} recipes -> {page_count} file(s)")
 
     associations.write_report()
