@@ -19,7 +19,7 @@ import sys
 from collections import Counter, defaultdict
 from itertools import chain
 from pathlib import Path
-from data_version import addon_mods, local_mod_name, source_directory, version_tag
+from data_version import addon_mods, local_mod_name, source_directory, version_module_title, version_tag
 from item_names import build_artifacts, image_name_config, read_items, write_item_name_index
 from nbt_identity import nbt_identity
 from bounded_json import HARD_MAX_BYTES, DEFAULT_MAX_BYTES, array_pages, encode_json, write_bounded
@@ -1936,7 +1936,10 @@ def main():
             resolution_path.write_text(json.dumps(resolution, ensure_ascii=False, indent=2), "utf-8")
         print(f"  [Item names] refreshed {count} pages from final items, ores and recipes")
         from storage_config import write_version_config
-        write_version_config(VERSION, Path(AUX_DIR) / "version-config.lua")
+        module = version_module_title("Data:Versions/" + VERSION_TAG)
+        output = Path(_PROJECT_ROOT) / "wikitext" / (module.replace(":", "/", 1) + ".lua")
+        write_version_config(VERSION, output)
+        print(f"  [Version config] {module}")
     print("All done!")
 
 

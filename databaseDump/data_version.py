@@ -62,6 +62,13 @@ def require_scope(prefix: str) -> None:
     title_part(parts[2])
 
 
+def version_module_title(data_prefix: str) -> str:
+    """数据版本对应的通用配置模块；沿用远端模组名与版本号。"""
+    require_scope(data_prefix)
+    version = data_prefix.rstrip("/").removeprefix("Data:Versions/")
+    return "Module:Database/Versions/" + version
+
+
 def source_directory(dumps_dir: str, mod: str, check_exists: bool = True) -> Path:
     """GTNH 使用 dumps 顶层，其他模组只使用 filtered 中自己的目录。"""
     if not dumps_dir:

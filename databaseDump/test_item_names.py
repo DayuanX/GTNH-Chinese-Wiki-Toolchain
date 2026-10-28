@@ -199,6 +199,8 @@ class NameRoutingTests(unittest.TestCase):
                 path.write_text('{"recipes":[{"outputItems":["mod:item"]}]}', 'utf-8')
 
             with patch.object(split_all, 'VERSION', str(root)), \
+                 patch.object(split_all, 'VERSION_TAG', 'GTNotLeisure/0.2.7-rc2'), \
+                 patch.object(split_all, '_PROJECT_ROOT', str(root)), \
                  patch.object(split_all, 'AUX_DIR', str(state)), \
                  patch.object(split_all, 'configure_source'), \
                  patch.dict(split_all.TASKS, {'recipes': ('Recipes', write_recipes)}), \
@@ -207,7 +209,9 @@ class NameRoutingTests(unittest.TestCase):
             record = json.loads(next((root / 'ItemNames').rglob('*.json')).read_bytes())['names']['物品']
             self.assertEqual(record['sourceHandlers'], ['mod/crafting'])
             self.assertEqual(json.loads((state / 'image-name-resolution.json').read_bytes())['indexFileCount'], 1)
-            self.assertIn('itemNameBuckets = 1', (state / 'version-config.lua').read_text('utf8'))
+            config = root / 'wikitext/Module/Database/Versions/GTNotLeisure/0.2.7-rc2.lua'
+            self.assertIn('itemNameBuckets = 1', config.read_text('utf8'))
+            self.assertFalse((state / 'version-config.lua').exists())
 
     def test_input_bucket_entries_merge_ore_semantic_names_and_keep_shared(self):
         from name_recipes import collect_handlers
